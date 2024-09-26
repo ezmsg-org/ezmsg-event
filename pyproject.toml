@@ -1,0 +1,35 @@
+[project]
+name = "ezmsg-event"
+description = "Namespace package for ezmsg to work with signal events like neural spikes and heartbeats"
+authors = [
+  { name = "Chadwick Boulay", email = "chadwick.boulay@gmail.com" },
+]
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["version"]
+dependencies = [
+    "ezmsg>=3.5.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3.3",
+]
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/ezmsg/event/__version__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ezmsg"]
+
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.6.8",
+]
