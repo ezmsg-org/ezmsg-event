@@ -139,20 +139,20 @@ def threshold_crossing(
                 # Calculate inter-event intervals
                 iei = np.diff(feat_over_idx)
                 # Find events that are too close to the previous event
-                drop_ = np.where(iei <= refrac_width)[0]
-                if len(drop_) > 0:
-                    while len(drop_) > 0:
-                        # Update next iei so it looks before the to-be-dropped event.
-                        iei[drop_[0] + 1] += iei[drop_[0]]
+                drop_idx = np.where(iei <= refrac_width)[0]
+                if len(drop_idx) > 0:
+                    while len(drop_idx) > 0:
+                        tmp_idx = drop_idx[0]
+                        # Update next iei so it refers to the to-be-dropped event.
+                        iei[tmp_idx + 1] += iei[tmp_idx]
                         # Remove the dropped event from iei
-                        iei = np.delete(iei, drop_[0])
-                        # Remove the dropped event from drop_.
-                        if iei[drop_[0]] > refrac_width:
-                            # After dropping, the next event is outside a refractory period, so we no longer drop it.
-                            drop_ = drop_[2:]
-                        else:
-                            # After dropping, the next event is still within refractory period, so we drop it next.
-                            drop_ = drop_[1:]
+                        iei = np.delete(iei, tmp_idx)
+                        # Remove the dropped event from drop_idx.
+                        drop_idx = drop_idx[1:]
+                        # See if we can now skip the next event because it is now outside the refractory period.
+                        if iei[tmp_idx] > refrac_width:
+                            drop_idx = drop_idx[1:]
+
                     # Reconstruct the ragged array
                     feat_crosses[feat_idx] = feat_over_idx[0] + np.hstack((0, np.cumsum(iei)))
                     # Update the b_cross_over array
