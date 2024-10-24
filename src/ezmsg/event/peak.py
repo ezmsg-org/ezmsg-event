@@ -162,7 +162,7 @@ def threshold_crossing(
         if not (align_on_peak or return_peak_val):
             # We don't care where the peak is, only that we crossed threshold
             n_pad = 0
-            # TODO:
+            # TODO: track last samples for next iteration
             result_feat_idx, result_samp_idx = np.where(b_cross_over.T)
             result_samp_idx += 1
             result_val = np.ones(result_samp_idx.shape, dtype=bool)
@@ -224,23 +224,25 @@ def threshold_crossing(
                         if (threshold >= 0 and pk_val <= data[start, ch_idx]) or (pk_val >= data[start, ch_idx]):
                             # Peak is smaller than peak-entry. Not a real peak.
                             continue
-                        result_idx.append(start + pk_offset)
-                        result_ch.append(ch_idx)
+                        result_samp_idx.append(start + pk_offset)
+                        result_feat_idx.append(ch_idx)
                         result_val.append(pk_val)
 
-        # Create output
-        result_idx = np.array(result_idx)
-        result_ch = np.array(result_ch)
-        result_val = np.array(result_val)
+            # Make arrays
+            result_samp_idx = np.array(result_samp_idx)
+            result_feat_idx = np.array(result_feat_idx)
+            result_val = np.array(result_val)
 
         if return_sparse_mat:
             # Prepare sparse matrix output
-            result = scipy.sparse.csr_array((result_val, (result_idx, result_ch)))
+            result = scipy.sparse.csr_array((result_val, (result_samp_idx, result_feat_idx)))
             msg_out = AxisArray(result, dims=["time", "ch"], axes={"time": msg_in.axes["time"]})
         else:
+            # TODO: If input ndim > 2 then we need to reinterpret result_feat_idx
+
             # Prepare EventMessage output
             msg_out = []
-            for idx, ch, val in zip(result_idx, result_ch, result_val):
+            for idx, ch, val in zip(result_samp_idx, result_feat_idx, result_val):
                 msg_out.append(EventMessage(idx, ch, val))
 
         # Prep next iteration
@@ -258,7 +260,7 @@ def threshold_crossing(
                 b_ch = over_ch_idx == ch_idx
                 if np.any(b_ch):
                     last_over = over_idx[b_ch][-1]
-                    if last_over > result_idx[result_ch == ch_idx][-1]:
+                    if last_over > result_samp_idx[result_feat_idx == ch_idx][-1]:
                         offset[ch_idx] = last_over
 
         offset[(n_in - offset) > max_width] = n_in - 1
