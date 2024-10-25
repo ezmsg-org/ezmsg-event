@@ -52,6 +52,7 @@ def threshold_crossing(
     sample_shape: typing.Optional[typing.Tuple[int, ...]] = None
     fs: typing.Optional[float] = None
     max_width: int = 0
+    min_width: int = 1  # Consider making this a parameter.
     refrac_width: int = 0
 
     scaler: typing.Optional[typing.Generator[AxisArray, AxisArray, None]] = None
@@ -97,8 +98,11 @@ def threshold_crossing(
         data_raw: typing.Optional[npt.NDArray] = None
         if scaler is not None:
             if return_peak_val:
+                # We will need a copy of the raw data to know what the values were at the peak
                 data_raw = msg_in.data.copy()
             msg_in = scaler.send(msg_in)
+        elif return_peak_val:
+            data_raw = msg_in.data
 
         data = msg_in.data
 
@@ -120,24 +124,26 @@ def threshold_crossing(
 
         # Prepend with previous iteration's overs. Must contain at least 1 sample for cross on new sample 0 to work.
         overs = np.concatenate((_overs, overs), axis=0)
+        # TODO: If we need peak value, then we also need to prepend previous raw values.
         # if align_on_peak or return_peak_val:
         #     data = np.concatenate((_data, data), axis=0)
 
         # Find threshold crossing where sample k is not over and sample k+1 is over.
         b_cross_over = np.logical_and(overs[:-1] != 1, overs[1:] == 1)
-        over_feat_idx, over_idx = np.where(b_cross_over.T)
-        over_idx += 1  # Because we looked at samples 1:
-        uq_feats, feat_splits = np.unique(over_feat_idx, return_index=True)
+        feat_idx, samp_idx = np.where(b_cross_over.T)
+        samp_idx += 1  # Because we looked at samples 1:
+
         # Get a ragged array of event indices per feature
-        feat_crosses: dict[int, npt.NDArray] = {k: v for k, v in zip(uq_feats, np.split(over_idx, feat_splits[1:]))}
+        uq_feats, feat_splits = np.unique(feat_idx, return_index=True)
+        feat_crosses: dict[int, npt.NDArray] = {k: v for k, v in zip(uq_feats, np.split(samp_idx, feat_splits[1:]))}
 
         # Optionally drop crossings during refractory period
         # TODO: Consider putting this into its own unit. The downside is some of the subsequent computation of peak
         #  loc / value for the to-be-dropped refractory events would otherwise be avoided.
         if refrac_width > 2:
-            for feat_idx, feat_over_idx in feat_crosses.items():
+            for f_idx, s_idx in feat_crosses.items():
                 # Calculate inter-event intervals
-                iei = np.diff(feat_over_idx)
+                iei = np.diff(s_idx)
                 # Find events that are too close to the previous event
                 drop_idx = np.where(iei <= refrac_width)[0]
                 if len(drop_idx) > 0:
@@ -154,117 +160,75 @@ def threshold_crossing(
                             drop_idx = drop_idx[1:]
 
                     # Reconstruct the ragged array
-                    feat_crosses[feat_idx] = feat_over_idx[0] + np.hstack((0, np.cumsum(iei)))
-                    # Update the b_cross_over array
-                    b_cross_over[:, feat_idx] = False
-                    b_cross_over[feat_crosses[feat_idx] - 1, feat_idx] = True
+                    feat_crosses[f_idx] = s_idx[0] + np.hstack((0, np.cumsum(iei)))
+                    # Reset the b_cross_over array for this feature
+                    b_cross_over[:, f_idx] = False
+                    b_cross_over[feat_crosses[f_idx] - 1, f_idx] = True
+
+            # TODO: Can we produce feat_idx and samp_idx faster from feat_crosses?
+            feat_idx, samp_idx = np.where(b_cross_over.T)
+            samp_idx += 1
+
+        # Last part of (intermediate or final) outputs
+        result_val = np.ones(samp_idx.shape, dtype=bool)
 
         if not (align_on_peak or return_peak_val):
             # We don't care where the peak is, only that we crossed threshold
             n_pad = 0
-            # TODO: track last samples for next iteration
-            result_feat_idx, result_samp_idx = np.where(b_cross_over.T)
-            result_samp_idx += 1
-            result_val = np.ones(result_samp_idx.shape, dtype=bool)
+            # TODO: Keep the last sample only overs and values for the next iteration.
         else:
-            # Prepare index arrays for eventual sparse matrix.
-            result_samp_idx = []
-            result_feat_idx = []
-            result_val = []
-
-            over_feat_idx, over_idx = np.where(b_cross_over.T)
-            over_idx += 1
-
             # Calculate peak location and value.
             # Pad using last sample until last cross has at least max_width following samples.
-            n_pad = max(0, max(over_idx) + max_width - overs.shape[0])
+            n_pad = max(0, max(samp_idx) + max_width - overs.shape[0])
             overs = np.pad(overs, ((0, n_pad), (0, 0)), mode="edge")
-            # extract signal from each cross over to max_width
-            t_sample = np.arange(max_width)[None, :] + over_idx[:, None]
-            ep_overs = overs[t_sample, over_feat_idx[:, None]]
+            # extract `overs` vectors for each event.
+            s_idx = np.arange(max_width)[None, :] + samp_idx[:, None]
+            ep_overs = overs[s_idx, feat_idx[:, None]]  # (n_events, max_width)
 
-            # TODO: if EP crosses back then keep it and add to result.
-            b_cross_back = np.logical_and(ep_overs[:-1] == 1, ep_overs[1:] != 1)
-            t_idx, ev_idx = np.where(b_cross_back)
-            t_idx += 1
+            # We will only consider events that crossed back
+            b_ev_crossback = np.any(ep_overs[:, 1:] != 1, axis=1)
 
-            # TODO: if EP does not cross back then keep it for next iteration. Remember to NOT keep padding.
+            # TODO: First we need to store events that failed to cross back for the next iteration
+            # Note: this buffer can accumulate indefinitely if we have a dead signal or one that
+            # that is constantly rising, so we drop crossovers that haven't had a cross back
+            # after some limit.
 
-            # If we have crossovers and cross backs...
-            if np.any(b_cross_over) and np.any(b_cross_back):
-                # Find the indices for the over and backs
+            # Now resume processing events that crossed back.
+            if np.any(b_cross_over) and np.any(b_ev_crossback):
+                # Find the event lengths: i.e., the first non-over-threshold value for each event.
+                ev_len = ep_overs[b_ev_crossback, 1:].argmin(axis=1)
+                ev_len += 1
 
-                back_idx, back_ch_idx = np.where(b_cross_back)
-                back_idx += 1
-                # Align over-and-back, channel-by-channel
-                for ch_idx in np.unique(over_ch_idx):
-                    _over = over_idx[over_ch_idx == ch_idx]
-                    _back = back_idx[back_ch_idx == ch_idx]
-                    _match = np.searchsorted(_over, _back, side="right") - 1
-                    _match_over, _match_bk = np.unique(_match, return_index=True)
-                    _over, _back = _over[_match_over], _back[_match_bk]
-                    _pk_widths = _back - _over
-                    _pk_entry_vals = data[_over, ch_idx]
-                    _pk_exit_vals = data[_back, ch_idx]
-                    b_keep = np.logical_and(
-                        _pk_widths > 2,
-                        _pk_widths <= max_width
-                    )
-                    # b_keep = np.logical_and(
-                    #     b_keep,
-                    #     _pk_exit_vals <= _pk_entry_vals
-                    # )
-                    _over, _back = _over[b_keep], _back[b_keep]
-                    for start, stop in zip(_over, _back):
-                        if threshold >= 0:
-                            pk_offset = np.argmax(data[start:stop, ch_idx])
-                        else:
-                            pk_offset = np.argmin(data[start:stop, ch_idx])
-                        pk_val = data[start + pk_offset, ch_idx]
-                        if (threshold >= 0 and pk_val <= data[start, ch_idx]) or (pk_val >= data[start, ch_idx]):
-                            # Peak is smaller than peak-entry. Not a real peak.
-                            continue
-                        result_samp_idx.append(start + pk_offset)
-                        result_feat_idx.append(ch_idx)
-                        result_val.append(pk_val)
+                # Only keep events that had the right width
+                b_width = np.logical_and(ev_len >= min_width, ev_len <= max_width)
+                ev_len = ev_len[b_width]
+                samp_idx = samp_idx[b_ev_crossback][b_width]
+                feat_idx = feat_idx[b_ev_crossback][b_width]
 
-            # Make arrays
-            result_samp_idx = np.array(result_samp_idx)
-            result_feat_idx = np.array(result_feat_idx)
-            result_val = np.array(result_val)
+                # For each unique event-length, extract the peak data and find the largest value and index.
+                pk_offset = np.zeros_like(ev_len)
+                uq_lens, len_grps = np.unique(ev_len, return_inverse=True)
+                for len_idx, ep_len in enumerate(uq_lens):
+                    b_grp = len_grps == len_idx
+                    ep_resamp = np.arange(ep_len)[None, :] + samp_idx[b_grp, None]
+                    eps = data[ep_resamp, feat_idx[b_grp, None]]
+                    if threshold >= 0:
+                        pk_offset[b_grp] = np.argmax(eps, axis=1)
+                    else:
+                        pk_offset[b_grp] = np.argmin(eps, axis=1)
+                if return_peak_val:
+                    result_val = data_raw[samp_idx + pk_offset, feat_idx]
+                if align_on_peak:
+                    samp_idx += pk_offset
 
         if return_sparse_mat:
             # Prepare sparse matrix output
-            result = scipy.sparse.csr_array((result_val, (result_samp_idx, result_feat_idx)))
+            result = scipy.sparse.csr_array((result_val, (samp_idx, feat_idx)))
             msg_out = AxisArray(result, dims=["time", "ch"], axes={"time": msg_in.axes["time"]})
         else:
-            # TODO: If input ndim > 2 then we need to reinterpret result_feat_idx
-
+            # TODO: If input ndim > 2 then we need to reinterpret feat_idx
             # Prepare EventMessage output
+            samp_times = msg_in.axes["time"].offset + msg_in.axes["time"].gain * samp_idx
             msg_out = []
-            for idx, ch, val in zip(result_samp_idx, result_feat_idx, result_val):
-                msg_out.append(EventMessage(idx, ch, val))
-
-        # Prep next iteration
-        # We want to retain the data from the last cross_over for each channel that does not have a
-        #  matching cross back. However, this buffer can accumulate indefinitely if we have a dead signal or one that
-        #  rises
-        #  that is constantly rising, so we eliminate crossovers that haven't had a cross back
-        #  after some limit.
-        n_in = data.shape[0]
-        offset = (n_in - 1) * np.ones((data.shape[1]), dtype=int)
-        if np.any(b_cross_over):
-            over_idx, over_ch_idx = np.where(b_cross_over)
-            over_idx += 1
-            for ch_idx in np.unique(over_ch_idx):
-                b_ch = over_ch_idx == ch_idx
-                if np.any(b_ch):
-                    last_over = over_idx[b_ch][-1]
-                    if last_over > result_samp_idx[result_feat_idx == ch_idx][-1]:
-                        offset[ch_idx] = last_over
-
-        offset[(n_in - offset) > max_width] = n_in - 1
-        _n_skip = n_in - offset - 1
-        offset = min(offset)
-        _data = data[offset:]
-        _overs = overs[offset:]
+            for t, ch, val in zip(samp_times, feat_idx, result_val):
+                msg_out.append(EventMessage(t, int(ch), 0, val))

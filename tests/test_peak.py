@@ -41,7 +41,7 @@ def test_threshold_crossing():
     msg_gen = array_chunker(data=in_dat, chunk_len=chunk_len, axis=0, fs=fs, tzero=0.0)
 
     # Extract spikes
-    transform = threshold_crossing(threshold=threshold, refrac_dur=0.001, return_peak_val=True)
+    transform = threshold_crossing(threshold=threshold, refrac_dur=0.001, return_peak_val=True, return_sparse_mat=False)
     msgs_out = [transform.send(_) for _ in msg_gen]
     msg_out = AxisArray.concatenate(msgs_out, dim="time")
 
