@@ -1,6 +1,7 @@
 """
 Detects peaks in a signal.
 """
+
 from dataclasses import replace
 import typing
 
@@ -22,7 +23,9 @@ def threshold_crossing(
     align_on_peak: bool = False,
     return_peak_val: bool = False,
     auto_scale_tau: float = 0.0,
-) -> typing.Generator[typing.Union[typing.List[EventMessage], AxisArray], AxisArray, None]:
+) -> typing.Generator[
+    typing.Union[typing.List[EventMessage], AxisArray], AxisArray, None
+]:
     """
     Detect threshold crossing events.
 
@@ -57,7 +60,9 @@ def threshold_crossing(
     # adaptive z-scoring.
     # TODO: This sample-by-sample adaptation is probably overkill. ezmsg-sigproc should add chunk-wise scaler updating.
 
-    _overs: typing.Optional[npt.NDArray] = None  # (n_feats, <=max_width) int == -1 or +1
+    _overs: typing.Optional[npt.NDArray] = (
+        None  # (n_feats, <=max_width) int == -1 or +1
+    )
     # Trailing buffer to track whether the previous sample(s) were past threshold.
 
     _data: typing.Optional[npt.NDArray] = None  # (n_feats, <=max_width) in_dtype
@@ -76,7 +81,7 @@ def threshold_crossing(
 
         # Extract basic metadata from message
         ax_idx = msg_in.get_axis_idx("time")
-        in_sample_shape = msg_in.data.shape[:ax_idx] + msg_in.data.shape[ax_idx + 1:]
+        in_sample_shape = msg_in.data.shape[:ax_idx] + msg_in.data.shape[ax_idx + 1 :]
         in_fs = 1 / msg_in.axes["time"].gain
 
         # If metadata has changed substantially, then reset state variables
@@ -97,11 +102,13 @@ def threshold_crossing(
             # _n_skip = np.zeros((n_flat_feats,), dtype=int)
             # TODO: Support > 2 dim output with pydata.sparse
             other_dim = "*".join([_ for _ in msg_in.dims if _ != "time"])
-            out_axes = msg_in.axes.copy() if msg_in.data.ndim == 2 else {"time": msg_in.axes["time"]}
+            out_axes = (
+                msg_in.axes.copy()
+                if msg_in.data.ndim == 2
+                else {"time": msg_in.axes["time"]}
+            )
             template = AxisArray(
-                np.array([[]]),
-                dims=[other_dim, "time"],
-                axes=out_axes
+                np.array([[]]), dims=[other_dim, "time"], axes=out_axes
             )
 
         # Optionally scale data
@@ -129,13 +136,20 @@ def threshold_crossing(
         overs = data >= threshold if threshold >= 0 else data <= threshold
 
         # Prepend our variables with previous iteration's values. We always expect at least 1 sample to carry over.
-        overs = np.concatenate((_overs if _overs is not None else overs[..., :1], overs), axis=-1)
+        overs = np.concatenate(
+            (_overs if _overs is not None else overs[..., :1], overs), axis=-1
+        )
         # If we need to identify _where_ the peak was then we must prepend previous data values.
         if align_on_peak or return_peak_val:
-            data = np.concatenate((_data if _data is not None else data[..., :1], data), axis=-1)
+            data = np.concatenate(
+                (_data if _data is not None else data[..., :1], data), axis=-1
+            )
         # If we're doing z-scoring but we need the actual peak value then we must prepend previous RAW values too.
         if return_peak_val and scaler is not None:
-            data_raw = np.concatenate((_data_raw if _data_raw is not None else data_raw[..., :1], data_raw), axis=-1)
+            data_raw = np.concatenate(
+                (_data_raw if _data_raw is not None else data_raw[..., :1], data_raw),
+                axis=-1,
+            )
         # We will modify _overs later, so for now we take note of how many samples were prepended.
         n_prepended = 1 if _overs is None else _overs.shape[-1]
 
@@ -183,7 +197,9 @@ def threshold_crossing(
         hold_idx = overs.shape[-1] - 1
         if len(samp_idx) == 0:
             # No events.
-            result_val = np.ones(samp_idx.shape, dtype=data.dtype if return_peak_val else bool)
+            result_val = np.ones(
+                samp_idx.shape, dtype=data.dtype if return_peak_val else bool
+            )
         elif not (min_width > 1 or align_on_peak or return_peak_val):
             # No postprocessing required.
             result_val = np.ones(samp_idx.shape, dtype=bool)
@@ -198,10 +214,11 @@ def threshold_crossing(
 
             # Multi-index to extract the vectors for each event
             s_idx = np.arange(max_width)[None, :] + samp_idx[:, None]
-            ep_overs = overs_padded[feat_idx[:, None], s_idx]   # (n_events, max_width)
+            ep_overs = overs_padded[feat_idx[:, None], s_idx]  # (n_events, max_width)
 
             # Find the event lengths: i.e., the first non-over-threshold value for each event.
-            ev_len = ep_overs[..., 1:].argmin(axis=-1)  # Warning: Values are invalid for events that don't cross back.
+            # Warning: Values are invalid for events that don't cross back.
+            ev_len = ep_overs[..., 1:].argmin(axis=-1)
             ev_len += 1
 
             # Identify peaks that successfully cross back
@@ -266,7 +283,8 @@ def threshold_crossing(
             if return_peak_val and scaler is not None:
                 _data_raw = data_raw[..., hold_idx:]
         _elapsed += hold_idx
-        _elapsed[feat_idx] = hold_idx - samp_idx  # Multiple-write to same index is fine because last value is desired.
+        _elapsed[feat_idx] = hold_idx - samp_idx
+        # ^ multiple-write to same index is fine because last value is desired.
 
         # Prepare sparse matrix output
         # Note: The first of the "held" samples is part of this iteration's return.
@@ -276,17 +294,10 @@ def threshold_crossing(
         samp_idx -= 1  # Discard first prepended sample.
         # TODO: Use pydata.sparse for ndim > 2  https://sparse.pydata.org/en/stable/
         result = scipy.sparse.csr_array(
-            (result_val, (feat_idx, samp_idx)),
-            shape=data.shape[:-1] + (n_out_samps,)
+            (result_val, (feat_idx, samp_idx)), shape=data.shape[:-1] + (n_out_samps,)
         )
         msg_out = replace(
             template,
             data=result,
-            axes={
-                **template.axes,
-                "time": replace(
-                    template.axes["time"],
-                    offset=t0
-                )
-            }
+            axes={**template.axes, "time": replace(template.axes["time"], offset=t0)},
         )

@@ -1,14 +1,11 @@
 import numpy as np
-from ezmsg.util.messages.axisarray import AxisArray
 from ezmsg.util.messages.chunker import array_chunker
 import pytest
 
 from ezmsg.event.peak import threshold_crossing
 
 
-@pytest.mark.parametrize(
-    "return_peak_val", [True, False]
-)
+@pytest.mark.parametrize("return_peak_val", [True, False])
 def test_threshold_crossing(return_peak_val: bool):
     fs = 30_000.0
     dur = 10.0
@@ -41,19 +38,25 @@ def test_threshold_crossing(return_peak_val: bool):
         elif ch_ix in [1, 2]:
             # -- Unfinished events at chunk boundaries --
             # Drop spike samples within 34 samples of the end of the 0th chunk
-            b_drop = np.logical_and(spike_samp_inds >= chunk_len - 34, spike_samp_inds < chunk_len)
+            b_drop = np.logical_and(
+                spike_samp_inds >= chunk_len - 34, spike_samp_inds < chunk_len
+            )
             spike_samp_inds = spike_samp_inds[~b_drop]
             if ch_ix == 1:
                 # In channel 1, we add a spike that is in the very last sample of the 0th chunk.
                 # It will be detected while processing the 1th chunk.
-                spike_samp_inds = np.insert(spike_samp_inds, np.searchsorted(spike_samp_inds, chunk_len), chunk_len - 1)
+                spike_samp_inds = np.insert(
+                    spike_samp_inds,
+                    np.searchsorted(spike_samp_inds, chunk_len),
+                    chunk_len - 1,
+                )
             elif ch_ix == 2:
                 # In channel 2, we make a long event at the end of the 0th chunk.
                 # It will be detected while processing the 1th chunk.
                 spike_samp_inds = np.insert(
                     spike_samp_inds,
                     np.searchsorted(spike_samp_inds, chunk_len - 10),
-                    np.arange(chunk_len - 10, chunk_len)
+                    np.arange(chunk_len - 10, chunk_len),
                 )
         elif ch_ix == 3:
             # -- Refractory across chunk boundaries --
@@ -61,12 +64,15 @@ def test_threshold_crossing(return_peak_val: bool):
             #  refractory period at the beginning of 2th chunk.
             ins_ev_start = 2 * chunk_len - 2
             # Clear events that are within target period.
-            b_drop = np.logical_and(spike_samp_inds >= ins_ev_start - 30, spike_samp_inds < ins_ev_start + 30)
+            b_drop = np.logical_and(
+                spike_samp_inds >= ins_ev_start - 30,
+                spike_samp_inds < ins_ev_start + 30,
+            )
             spike_samp_inds = spike_samp_inds[~b_drop]
             spike_samp_inds = np.insert(
                 spike_samp_inds,
                 np.searchsorted(spike_samp_inds, ins_ev_start),
-                [ins_ev_start, ins_ev_start + 10]
+                [ins_ev_start, ins_ev_start + 10],
             )
             # Note: Further down we also drop events in other channels near the end of chunk 2 to make sure
             #  they don't cause the event in channel 3 to be held back to the next iteration.
@@ -75,9 +81,7 @@ def test_threshold_crossing(return_peak_val: bool):
             # In channel 4, we add a spike at the very beginning of chunk 1th chunk after making sure 0th was empty.
             spike_samp_inds = spike_samp_inds[spike_samp_inds > chunk_len]
             spike_samp_inds = np.insert(
-                spike_samp_inds,
-                np.searchsorted(spike_samp_inds, chunk_len),
-                chunk_len
+                spike_samp_inds, np.searchsorted(spike_samp_inds, chunk_len), chunk_len
             )
         spike_offsets.append(spike_samp_inds)
 
@@ -87,7 +91,7 @@ def test_threshold_crossing(return_peak_val: bool):
         if ch_ix != 3:  # See above for special case in channel 3
             b_drop = np.logical_or(
                 b_drop,
-                np.logical_and(so_arr >= 2 * chunk_len - 30, so_arr < 2 * chunk_len)
+                np.logical_and(so_arr >= 2 * chunk_len - 30, so_arr < 2 * chunk_len),
             )
         spike_offsets[ch_ix] = so_arr[~b_drop]
 
@@ -95,7 +99,9 @@ def test_threshold_crossing(return_peak_val: bool):
     in_dat = rng.normal(size=(n_times, n_chans), loc=0, scale=0.1)
     in_dat = np.clip(in_dat, -threshold, threshold)
     for ch_ix, ch_spk_offs in enumerate(spike_offsets):
-        in_dat[ch_spk_offs, ch_ix] = threshold + np.random.random(size=(len(ch_spk_offs),))
+        in_dat[ch_spk_offs, ch_ix] = threshold + np.random.random(
+            size=(len(ch_spk_offs),)
+        )
 
     bkup_dat = in_dat.copy()
     msg_gen = array_chunker(data=in_dat, chunk_len=chunk_len, axis=0, fs=fs, tzero=0.0)
@@ -124,9 +130,13 @@ def test_threshold_crossing(return_peak_val: bool):
         exp_feat_inds.extend([ch_ix] * len(ev_ix))
 
     import scipy.sparse
+
     final_arr = scipy.sparse.hstack([_.data for _ in msgs_out])
     feat_inds, samp_inds = final_arr.nonzero()
     assert len(samp_inds) == len(exp_samp_inds)
     assert len(feat_inds) == len(exp_feat_inds)
     assert np.array_equal(np.sort(samp_inds), np.sort(exp_samp_inds))
-    assert np.array_equal(feat_inds[np.argsort(samp_inds)], np.array(exp_feat_inds)[np.argsort(exp_samp_inds)])
+    assert np.array_equal(
+        feat_inds[np.argsort(samp_inds)],
+        np.array(exp_feat_inds)[np.argsort(exp_samp_inds)],
+    )
