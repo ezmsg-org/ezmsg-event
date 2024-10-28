@@ -1,6 +1,7 @@
 """
 Detects peaks in a signal.
 """
+from dataclasses import replace
 import typing
 
 from ezmsg.util.messages.axisarray import AxisArray
@@ -21,7 +22,6 @@ def threshold_crossing(
     align_on_peak: bool = False,
     return_peak_val: bool = False,
     auto_scale_tau: float = 0.0,
-    return_sparse_mat: bool = False,
 ) -> typing.Generator[typing.Union[typing.List[EventMessage], AxisArray], AxisArray, None]:
     """
     Detect threshold crossing events.
@@ -34,8 +34,6 @@ def threshold_crossing(
               If True, the sample index indicates the sample with the largest deviation after threshold crossing.
         return_peak_val: If True then the peak value is included in the EventMessage or sparse matrix payload.
         auto_scale_tau: If > 0, the data will be passed through a standard scaler prior to thresholding.
-        return_sparse_mat: If False (default), the return value is a list of EventMessage. If True, the return value
-          is an AxisArray message with a sparse matrix in its data payload.
 
     Note: If either align_on_peak or return_peak_val are True then it is necessary to find the actual peak and not
         just the threshold crossing. This will drastically increase the computational demand. It is recommended to
@@ -56,19 +54,22 @@ def threshold_crossing(
     refrac_width: int = 0
 
     scaler: typing.Optional[typing.Generator[AxisArray, AxisArray, None]] = None
-    # adaptive z-scoring. TODO: This sample-by-sample adaptation is probably overkill. We should
-    #  implement a new scaler for chunk-wise updating.
+    # adaptive z-scoring.
+    # TODO: This sample-by-sample adaptation is probably overkill. ezmsg-sigproc should add chunk-wise scaler updating.
 
-    _overs: typing.Optional[npt.NDArray] = None  # (max_width, n_feats) int == -1 or +1
+    _overs: typing.Optional[npt.NDArray] = None  # (n_feats, <=max_width) int == -1 or +1
     # Trailing buffer to track whether the previous sample(s) were past threshold.
+
+    _data: typing.Optional[npt.NDArray] = None  # (n_feats, <=max_width) in_dtype
+    # Trailing buffer in case peak spans sample chunks. Only used if align_on_peak or return_peak_val.
+
+    _data_raw: typing.Optional[npt.NDArray] = None  # (n_feats, <=max_width) in_dtype
+    # Only used if return_peak_val and scaler is not None
 
     _elapsed: typing.Optional[npt.NDArray] = None  # (n_feats,) int
     # Number of samples since last event. Used to enforce refractory period across iterations.
-
-    _n_skip: typing.Optional[npt.NDArray] = None  # (n_feats,) int
-
-    _data: typing.Optional[npt.NDArray] = None  # (max_width, n_feats) in_dtype
-    # Trailing buffer in case peak spans sample chunks. Only used if return_peak_val is True.
+    #
+    # _n_skip: typing.Optional[npt.NDArray] = None  # (n_feats,) int
 
     while True:
         msg_in: AxisArray = yield msg_out
@@ -88,147 +89,204 @@ def threshold_crossing(
             refrac_width = int(refrac_dur * fs)
             if auto_scale_tau > 0:
                 scaler = scaler_np(time_constant=auto_scale_tau, axis="time")
+            _overs = None
+            _data = None
+            _data_raw = None
             n_flat_feats = np.prod(sample_shape)
-            _overs = np.zeros((0, n_flat_feats), dtype=int)
-            _n_skip = np.zeros((n_flat_feats,), dtype=int)
-            if align_on_peak or return_peak_val:
-                _data = np.zeros((0, n_flat_feats), dtype=msg_in.data.dtype)
+            _elapsed = np.zeros((n_flat_feats,), dtype=int) + (refrac_width + 1)
+            # _n_skip = np.zeros((n_flat_feats,), dtype=int)
+            # TODO: Support > 2 dim output with pydata.sparse
+            other_dim = "*".join([_ for _ in msg_in.dims if _ != "time"])
+            out_axes = msg_in.axes.copy() if msg_in.data.ndim == 2 else {"time": msg_in.axes["time"]}
+            template = AxisArray(
+                np.array([[]]),
+                dims=[other_dim, "time"],
+                axes=out_axes
+            )
 
         # Optionally scale data
         data_raw: typing.Optional[npt.NDArray] = None
         if scaler is not None:
             if return_peak_val:
-                # We will need a copy of the raw data to know what the values were at the peak
                 data_raw = msg_in.data.copy()
             msg_in = scaler.send(msg_in)
-        elif return_peak_val:
-            data_raw = msg_in.data
 
         data = msg_in.data
 
         # Put the time axis in the 0th dim.
-        if ax_idx != 0:
-            data = np.moveaxis(data, ax_idx, 0)
+        if ax_idx != data.ndim - 1:
+            data = np.moveaxis(data, ax_idx, -1)
             if data_raw is not None:
-                data_raw = np.moveaxis(data_raw, ax_idx, 0)
+                data_raw = np.moveaxis(data_raw, ax_idx, -1)
 
         # Flatten the feature dimensions
         if data.ndim > 2:
-            data = data.reshape((data.shape[0], -1))
+            data = data.reshape((-1, data.shape[-1]))
             if data_raw is not None:
-                data_raw = data_raw.reshape((data_raw.shape[0], -1))
+                data_raw = data_raw.reshape((-1, data_raw.shape[-1]))
 
-        # Check if each sample is beyond threshold.
-        k = -1 if threshold < 0 else 1
-        overs = k * (data >= threshold) - k * (data < threshold)
+        # Check each sample relative to threshold.
+        overs = data >= threshold if threshold >= 0 else data <= threshold
 
-        # Prepend with previous iteration's overs. Must contain at least 1 sample for cross on new sample 0 to work.
-        overs = np.concatenate((_overs, overs), axis=0)
-        # TODO: If we need peak value, then we also need to prepend previous raw values.
-        # if align_on_peak or return_peak_val:
-        #     data = np.concatenate((_data, data), axis=0)
+        # Prepend our variables with previous iteration's values. We always expect at least 1 sample to carry over.
+        overs = np.concatenate((_overs if _overs is not None else overs[..., :1], overs), axis=-1)
+        # If we need to identify _where_ the peak was then we must prepend previous data values.
+        if align_on_peak or return_peak_val:
+            data = np.concatenate((_data if _data is not None else data[..., :1], data), axis=-1)
+        # If we're doing z-scoring but we need the actual peak value then we must prepend previous RAW values too.
+        if return_peak_val and scaler is not None:
+            data_raw = np.concatenate((_data_raw if _data_raw is not None else data_raw[..., :1], data_raw), axis=-1)
+        # We will modify _overs later, so for now we take note of how many samples were prepended.
+        n_prepended = 1 if _overs is None else _overs.shape[-1]
 
-        # Find threshold crossing where sample k is not over and sample k+1 is over.
-        b_cross_over = np.logical_and(overs[:-1] != 1, overs[1:] == 1)
-        feat_idx, samp_idx = np.where(b_cross_over.T)
-        samp_idx += 1  # Because we looked at samples 1:
+        # Find threshold crossing where sample k is over and sample k-1 is not over.
+        b_cross_over = np.logical_and(~overs[..., :-1], overs[..., 1:])
 
-        # Get a ragged array of event indices per feature
-        uq_feats, feat_splits = np.unique(feat_idx, return_index=True)
-        feat_crosses: dict[int, npt.NDArray] = {k: v for k, v in zip(uq_feats, np.split(samp_idx, feat_splits[1:]))}
+        feat_idx, samp_idx = np.where(b_cross_over)
+        # Because we looked at samples [1:]...
+        samp_idx += 1
+        # Note: There is an assumption that the 0th sample only serves as a reference and is not part of the output;
+        #  this will be trimmed at the very end. For now the offset is useful for bookkeeping (peak finding, etc.).
 
         # Optionally drop crossings during refractory period
-        # TODO: Consider putting this into its own unit. The downside is some of the subsequent computation of peak
-        #  loc / value for the to-be-dropped refractory events would otherwise be avoided.
-        if refrac_width > 2:
-            for f_idx, s_idx in feat_crosses.items():
-                # Calculate inter-event intervals
-                iei = np.diff(s_idx)
-                # Find events that are too close to the previous event
-                drop_idx = np.where(iei <= refrac_width)[0]
-                if len(drop_idx) > 0:
-                    while len(drop_idx) > 0:
-                        tmp_idx = drop_idx[0]
-                        # Update next iei so it refers to the to-be-dropped event.
-                        iei[tmp_idx + 1] += iei[tmp_idx]
-                        # Remove the dropped event from iei
-                        iei = np.delete(iei, tmp_idx)
-                        # Remove the dropped event from drop_idx.
-                        drop_idx = drop_idx[1:]
-                        # See if we can now skip the next event because it is now outside the refractory period.
-                        if iei[tmp_idx] > refrac_width:
-                            drop_idx = drop_idx[1:]
+        if refrac_width > 2 and len(samp_idx) > 0:
+            # TODO: Consider putting this into its own unit. The downside to moving it out is that some of the remaining
+            #  computation in this function is unnecessary for to-be-dropped events.
+            uq_feats, feat_splits = np.unique(feat_idx, return_index=True)
+            ieis = np.diff(np.hstack(([samp_idx[0] + 1], samp_idx)))
+            # Reset elapsed time at feature boundaries.
+            ieis[feat_splits] = samp_idx[feat_splits] + _elapsed[uq_feats]
+            b_drop = ieis <= refrac_width
+            drop_idx = np.where(b_drop)[0]
+            final_drop = []
+            while len(drop_idx) > 0:
+                d_idx = drop_idx[0]
+                # Update next iei so its interval refers to the event before the to-be-dropped event.
+                #  but only if the next iei belongs to the same feature.
+                if ((d_idx + 1) < len(ieis)) and (d_idx + 1) not in feat_splits:
+                    ieis[d_idx + 1] += ieis[d_idx]
+                # We will later remove this event from samp_idx and feat_idx
+                final_drop.append(d_idx)
+                # Remove the dropped event from drop_idx.
+                drop_idx = drop_idx[1:]
 
-                    # Reconstruct the ragged array
-                    feat_crosses[f_idx] = s_idx[0] + np.hstack((0, np.cumsum(iei)))
-                    # Reset the b_cross_over array for this feature
-                    b_cross_over[:, f_idx] = False
-                    b_cross_over[feat_crosses[f_idx] - 1, f_idx] = True
+                # If the next event is now outside the refractory period then it will not be dropped.
+                # TODO: Maybe we don't want this feature? e.g., if the 3rd in a triplet is not within the refractory
+                #  period of the first, but it is within the refractory period of the 2nd which is now dropped,
+                #  maybe the 3rd event should still be dropped? If so then we can refactor above to drop all at once.
+                if len(drop_idx) > 0 and ieis[drop_idx[0]] > refrac_width:
+                    drop_idx = drop_idx[1:]
 
-            # TODO: Can we produce feat_idx and samp_idx faster from feat_crosses?
-            feat_idx, samp_idx = np.where(b_cross_over.T)
-            samp_idx += 1
+            samp_idx = np.delete(samp_idx, final_drop)
+            feat_idx = np.delete(feat_idx, final_drop)
 
-        # Last part of (intermediate or final) outputs
-        result_val = np.ones(samp_idx.shape, dtype=bool)
-
-        if not (align_on_peak or return_peak_val):
-            # We don't care where the peak is, only that we crossed threshold
-            n_pad = 0
-            # TODO: Keep the last sample only overs and values for the next iteration.
+        hold_idx = overs.shape[-1] - 1
+        if len(samp_idx) == 0:
+            # No events.
+            result_val = np.ones(samp_idx.shape, dtype=data.dtype if return_peak_val else bool)
+        elif not (min_width > 1 or align_on_peak or return_peak_val):
+            # No postprocessing required.
+            result_val = np.ones(samp_idx.shape, dtype=bool)
         else:
-            # Calculate peak location and value.
-            # Pad using last sample until last cross has at least max_width following samples.
-            n_pad = max(0, max(samp_idx) + max_width - overs.shape[0])
-            overs = np.pad(overs, ((0, n_pad), (0, 0)), mode="edge")
-            # extract `overs` vectors for each event.
+            # Do postprocessing of events.
+
+            # We extract max_width-length vectors of `overs` values for each event.
+            # Pad using last sample until last crossover has at least max_width following samples.
+            n_pad = max(0, max(samp_idx) + max_width - overs.shape[-1])
+            pad_width = ((0, 0),) * (overs.ndim - 1) + ((0, n_pad),)
+            overs_padded = np.pad(overs, pad_width, mode="edge")
+
+            # Multi-index to extract the vectors for each event
             s_idx = np.arange(max_width)[None, :] + samp_idx[:, None]
-            ep_overs = overs[s_idx, feat_idx[:, None]]  # (n_events, max_width)
+            ep_overs = overs_padded[feat_idx[:, None], s_idx]   # (n_events, max_width)
 
-            # We will only consider events that crossed back
-            b_ev_crossback = np.any(ep_overs[:, 1:] != 1, axis=1)
+            # Find the event lengths: i.e., the first non-over-threshold value for each event.
+            ev_len = ep_overs[..., 1:].argmin(axis=-1)  # Warning: Values are invalid for events that don't cross back.
+            ev_len += 1
 
-            # TODO: First we need to store events that failed to cross back for the next iteration
-            # Note: this buffer can accumulate indefinitely if we have a dead signal or one that
-            # that is constantly rising, so we drop crossovers that haven't had a cross back
-            # after some limit.
+            # Identify peaks that successfully cross back
+            b_ev_crossback = np.any(~ep_overs[..., 1:], axis=-1)
 
-            # Now resume processing events that crossed back.
-            if np.any(b_cross_over) and np.any(b_ev_crossback):
-                # Find the event lengths: i.e., the first non-over-threshold value for each event.
-                ev_len = ep_overs[b_ev_crossback, 1:].argmin(axis=1)
-                ev_len += 1
+            if min_width > 1:
+                # Drop events that have crossed back but fail min_width
+                b_short = np.logical_and(b_ev_crossback, ev_len < min_width)
+                b_long = ~b_short
+                samp_idx = samp_idx[b_long]
+                feat_idx = feat_idx[b_long]
+                ev_len = ev_len[b_long]
+                b_ev_crossback = b_ev_crossback[b_long]
 
-                # Only keep events that had the right width
-                b_width = np.logical_and(ev_len >= min_width, ev_len <= max_width)
-                ev_len = ev_len[b_width]
-                samp_idx = samp_idx[b_ev_crossback][b_width]
-                feat_idx = feat_idx[b_ev_crossback][b_width]
+            # We are returning a sparse array and unfinished peaks must be buffered for the next iteration.
+            # Find the earliest unfinished event. If none, we still buffer the final sample.
+            b_unf = ~b_ev_crossback
+            hold_idx = samp_idx[b_unf].min() if np.any(b_unf) else hold_idx
 
-                # For each unique event-length, extract the peak data and find the largest value and index.
+            # Trim events that are past the hold_idx. They will be processed next iteration.
+            b_pass_ev = samp_idx < hold_idx
+            samp_idx = samp_idx[b_pass_ev]
+            feat_idx = feat_idx[b_pass_ev]
+            ev_len = ev_len[b_pass_ev]
+
+            if np.any(b_unf):
+                # Must hold back at least 1 sample before start of unfinished events so we can re-detect.
+                hold_idx = max(hold_idx - 1, 0)
+
+            if not return_peak_val:
+                result_val = np.ones(samp_idx.shape, dtype=bool)
+
+            # For remaining _finished_ peaks, get the peak location -- for alignment or if returning its value.
+            if align_on_peak or return_peak_val:
+                # We process peaks in batches based on their length, otherwise short peaks could give
+                #  incorrect argmax results.
+                # TODO: Check performance of using a masked array instead. Might take longer to create the mask.
                 pk_offset = np.zeros_like(ev_len)
                 uq_lens, len_grps = np.unique(ev_len, return_inverse=True)
                 for len_idx, ep_len in enumerate(uq_lens):
                     b_grp = len_grps == len_idx
                     ep_resamp = np.arange(ep_len)[None, :] + samp_idx[b_grp, None]
-                    eps = data[ep_resamp, feat_idx[b_grp, None]]
+                    eps = data[feat_idx[b_grp, None], ep_resamp]
                     if threshold >= 0:
                         pk_offset[b_grp] = np.argmax(eps, axis=1)
                     else:
                         pk_offset[b_grp] = np.argmin(eps, axis=1)
+
+                # Now that we have the offset to the peak for each event, we can find the peak value and/or align.
                 if return_peak_val:
-                    result_val = data_raw[samp_idx + pk_offset, feat_idx]
+                    if scaler is None:
+                        result_val = data[feat_idx, samp_idx + pk_offset]
+                    else:
+                        result_val = data_raw[feat_idx, samp_idx + pk_offset]
                 if align_on_peak:
                     samp_idx += pk_offset
 
-        if return_sparse_mat:
-            # Prepare sparse matrix output
-            result = scipy.sparse.csr_array((result_val, (samp_idx, feat_idx)))
-            msg_out = AxisArray(result, dims=["time", "ch"], axes={"time": msg_in.axes["time"]})
-        else:
-            # TODO: If input ndim > 2 then we need to reinterpret feat_idx
-            # Prepare EventMessage output
-            samp_times = msg_in.axes["time"].offset + msg_in.axes["time"].gain * samp_idx
-            msg_out = []
-            for t, ch, val in zip(samp_times, feat_idx, result_val):
-                msg_out.append(EventMessage(t, int(ch), 0, val))
+        # Save data for next iteration
+        _overs = overs[..., hold_idx:]
+        if align_on_peak or return_peak_val:
+            _data = data[..., hold_idx:]
+            if return_peak_val and scaler is not None:
+                _data_raw = data_raw[..., hold_idx:]
+        _elapsed += hold_idx
+        _elapsed[feat_idx] = hold_idx - samp_idx  # Multiple-write to same index is fine because last value is desired.
+
+        # Prepare sparse matrix output
+        # Note: The first of the "held" samples is part of this iteration's return.
+        #  Likewise, the first prepended sample was part of the previous iteration's return.
+        n_out_samps = hold_idx
+        t0 = msg_in.axes["time"].offset - (n_prepended - 1) * msg_in.axes["time"].gain
+        samp_idx -= 1  # Discard first prepended sample.
+        # TODO: Use pydata.sparse for ndim > 2  https://sparse.pydata.org/en/stable/
+        result = scipy.sparse.csr_array(
+            (result_val, (feat_idx, samp_idx)),
+            shape=data.shape[:-1] + (n_out_samps,)
+        )
+        msg_out = replace(
+            template,
+            data=result,
+            axes={
+                **template.axes,
+                "time": replace(
+                    template.axes["time"],
+                    offset=t0
+                )
+            }
+        )
