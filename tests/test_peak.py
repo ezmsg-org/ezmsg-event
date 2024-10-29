@@ -59,7 +59,7 @@ def test_threshold_crossing(return_peak_val: bool):
                     np.arange(chunk_len - 10, chunk_len),
                 )
         elif ch_ix == 3:
-            # -- Refractory across chunk boundaries --
+            # -- Refractoriness across chunk boundaries --
             # In channel 3, we add a spike 2 samples before the end of 1th chunk, and another within its
             #  refractory period at the beginning of 2th chunk.
             ins_ev_start = 2 * chunk_len - 2
@@ -69,12 +69,13 @@ def test_threshold_crossing(return_peak_val: bool):
                 spike_samp_inds < ins_ev_start + 30,
             )
             spike_samp_inds = spike_samp_inds[~b_drop]
+            # Add the two events; one 2 samples before the chunk boundary and another 10 samples later.
             spike_samp_inds = np.insert(
                 spike_samp_inds,
                 np.searchsorted(spike_samp_inds, ins_ev_start),
                 [ins_ev_start, ins_ev_start + 10],
             )
-            # Note: Further down we also drop events in other channels near the end of chunk 2 to make sure
+            # Note: We must also drop events in other channels near the end of chunk 2 to make sure
             #  they don't cause the event in channel 3 to be held back to the next iteration.
         elif ch_ix == 4:
             # -- Spike in first sample of non-first chunk --
@@ -85,10 +86,13 @@ def test_threshold_crossing(return_peak_val: bool):
             )
         spike_offsets.append(spike_samp_inds)
 
-    # Clear all spikes that occur in 4th - 5th chunks to test flow logic.
+    # Clear all events that occur in 4th - 5th chunks to test flow logic.
+    # Additionally clear events in the last sample so we don't have lingering events.
     for ch_ix, so_arr in enumerate(spike_offsets):
         b_drop = np.logical_and(so_arr >= chunk_len * 3, so_arr < chunk_len * 5)
-        if ch_ix != 3:  # See above for special case in channel 3
+        b_drop = np.logical_or(b_drop, so_arr == n_times - 1)
+        if ch_ix != 3:
+            # See above for special case in channel 3
             b_drop = np.logical_or(
                 b_drop,
                 np.logical_and(so_arr >= 2 * chunk_len - 30, so_arr < 2 * chunk_len),
@@ -128,15 +132,32 @@ def test_threshold_crossing(return_peak_val: bool):
             ev_ix = np.delete(ev_ix, drop_idx)
         exp_samp_inds.extend(ev_ix)
         exp_feat_inds.extend([ch_ix] * len(ev_ix))
+    exp_feat_inds = np.array(exp_feat_inds)
+    exp_samp_inds = np.array(exp_samp_inds)
 
     import scipy.sparse
 
     final_arr = scipy.sparse.hstack([_.data for _ in msgs_out])
     feat_inds, samp_inds = final_arr.nonzero()
+
+    """
+    # This block of code was used to debug some discrepancies that popped up when the last sample of the last chunk
+    #  had an event, but the processing node wouldn't return it because it was unfinished.
+    if len(samp_inds) != len(exp_samp_inds):
+        uq_feats, feat_splits = np.unique(feat_inds, return_index=True)
+        feat_crosses = {k: v for k, v in zip(uq_feats, np.split(samp_inds, feat_splits[1:]))}
+        uq_feats, feat_splits = np.unique(exp_feat_inds, return_index=True)
+        exp_feat_crosses = {k: v for k, v in zip(uq_feats, np.split(exp_samp_inds, feat_splits[1:]))}
+        for k, v in feat_crosses.items():
+            if not np.array_equal(v, exp_feat_crosses[k]):
+                print(f"Channel {k}:")
+                if len(exp_feat_crosses[k]) > len(v):
+                    print(f"\tMissing: {np.setdiff1d(exp_feat_crosses[k], v)}")
+                else:
+                    print(f"\tExtra: {np.setdiff1d(v, exp_feat_crosses[k])}")
+    """
+
     assert len(samp_inds) == len(exp_samp_inds)
     assert len(feat_inds) == len(exp_feat_inds)
-    assert np.array_equal(np.sort(samp_inds), np.sort(exp_samp_inds))
-    assert np.array_equal(
-        feat_inds[np.argsort(samp_inds)],
-        np.array(exp_feat_inds)[np.argsort(exp_samp_inds)],
-    )
+    assert np.array_equal(samp_inds, exp_samp_inds)
+    assert np.array_equal(feat_inds, exp_feat_inds)
