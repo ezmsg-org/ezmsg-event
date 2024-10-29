@@ -8,7 +8,7 @@ def generate_events(
     n_chans: int,
     rate_range: tuple[float, float],
     chunk_dur: float,
-) -> npt.NDArray:
+) -> list[npt.NDArray]:
     n_times = int(fs * dur)
     frates = np.random.uniform(rate_range[0], rate_range[1], n_chans)
     frates[:3] = np.random.uniform(150, 200, 3)  # Boost rate of first 3 chans.
@@ -94,3 +94,24 @@ def generate_events(
         spike_offsets[ch_ix] = so_arr[~b_drop]
 
     return spike_offsets
+
+
+def generate_white_noise_with_events(
+    fs: float,
+    dur: float,
+    n_chans: int,
+    rate_range: tuple[float, float],
+    chunk_dur: float,
+    threshold: float,
+) -> npt.NDArray:
+    n_times = int(fs * dur)
+    spike_offsets = generate_events(fs, dur, n_chans, rate_range, chunk_dur)
+
+    rng = np.random.default_rng()
+    mixed = rng.normal(size=(n_times, n_chans), loc=0, scale=0.1)
+    mixed = np.clip(mixed, -np.abs(threshold), np.abs(threshold))
+    for ch_ix, ch_spk_offs in enumerate(spike_offsets):
+        mixed[ch_spk_offs, ch_ix] = threshold + np.random.random(
+            size=(len(ch_spk_offs),)
+        )
+    return mixed

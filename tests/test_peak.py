@@ -2,7 +2,7 @@ import numpy as np
 from ezmsg.util.messages.chunker import array_chunker
 import pytest
 
-from ezmsg.event.util.simulate import generate_events
+from ezmsg.event.util.simulate import generate_white_noise_with_events
 from ezmsg.event.peak import threshold_crossing
 
 
@@ -15,20 +15,12 @@ def test_threshold_crossing(return_peak_val: bool):
     rate_range = (1, 100)
     chunk_dur = 0.02
     refrac_dur = 0.001
-    n_times = int(fs * dur)
     refrac_width = int(fs * refrac_dur)
     chunk_len = int(fs * chunk_dur)
 
-    spike_offsets = generate_events(fs, dur, n_chans, rate_range, chunk_dur)
-
-    # Create simulated spiking data: white noise + spikes
-    rng = np.random.default_rng()
-    in_dat = rng.normal(size=(n_times, n_chans), loc=0, scale=0.1)
-    in_dat = np.clip(in_dat, -threshold, threshold)
-    for ch_ix, ch_spk_offs in enumerate(spike_offsets):
-        in_dat[ch_spk_offs, ch_ix] = threshold + np.random.random(
-            size=(len(ch_spk_offs),)
-        )
+    in_dat = generate_white_noise_with_events(
+        fs, dur, n_chans, rate_range, chunk_dur, threshold
+    )
 
     bkup_dat = in_dat.copy()
     msg_gen = array_chunker(data=in_dat, chunk_len=chunk_len, axis=0, fs=fs, tzero=0.0)
