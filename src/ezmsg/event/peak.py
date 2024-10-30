@@ -5,6 +5,8 @@ Detects peaks in a signal.
 from dataclasses import replace
 import typing
 
+import ezmsg.core as ez
+from ezmsg.sigproc.base import GenAxisArray
 from ezmsg.util.messages.axisarray import AxisArray
 from ezmsg.util.generator import consumer
 from ezmsg.sigproc.scaler import scaler_np
@@ -300,4 +302,27 @@ def threshold_crossing(
             template,
             data=result,
             axes={**template.axes, "time": replace(template.axes["time"], offset=t0)},
+        )
+
+
+class ThresholdSettings(ez.Settings):
+    threshold: float = -3.5
+    max_peak_dur: float = 0.002
+    refrac_dur: float = 0.001
+    align_on_peak: bool = False
+    return_peak_val: bool = False
+    auto_scale_tau: float = 0.0
+
+
+class ThresholdCrossing(GenAxisArray):
+    SETTINGS = ThresholdSettings
+
+    def construct_generator(self):
+        self.STATE.gen = threshold_crossing(
+            threshold=self.SETTINGS.threshold,
+            max_peak_dur=self.SETTINGS.max_peak_dur,
+            refrac_dur=self.SETTINGS.refrac_dur,
+            align_on_peak=self.SETTINGS.align_on_peak,
+            return_peak_val=self.SETTINGS.return_peak_val,
+            auto_scale_tau=self.SETTINGS.auto_scale_tau
         )

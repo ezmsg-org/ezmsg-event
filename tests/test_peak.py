@@ -1,9 +1,19 @@
+import os
+from pathlib import Path
+import tempfile
+import typing
+
 import numpy as np
-from ezmsg.util.messages.chunker import array_chunker
+import scipy.sparse
 import pytest
+import ezmsg.core as ez
+from ezmsg.util.messagecodec import message_log
+from ezmsg.util.messagelogger import MessageLogger
+from ezmsg.util.messages.chunker import array_chunker, ArrayChunker
+from ezmsg.util.terminate import TerminateOnTotal
 
 from ezmsg.event.util.simulate import generate_white_noise_with_events
-from ezmsg.event.peak import threshold_crossing
+from ezmsg.event.peak import threshold_crossing, ThresholdCrossing, ThresholdSettings
 
 
 @pytest.mark.parametrize("return_peak_val", [True, False])
@@ -76,3 +86,58 @@ def test_threshold_crossing(return_peak_val: bool):
     assert len(feat_inds) == len(exp_feat_inds)
     assert np.array_equal(samp_inds, exp_samp_inds)
     assert np.array_equal(feat_inds, exp_feat_inds)
+
+
+def get_test_fn(test_name: typing.Optional[str] = None, extension: str = "txt") -> Path:
+    """PYTEST compatible temporary test file creator"""
+    if test_name is None:
+        test_name = os.environ.get("PYTEST_CURRENT_TEST")
+        if test_name is not None:
+            test_name = test_name.split(":")[-1].split(" ")[0]
+        else:
+            test_name = __name__
+
+    file_path = Path(tempfile.gettempdir())
+    file_path = file_path / Path(f"{test_name}.{extension}")
+
+    # Create the file
+    with open(file_path, "w"):
+        pass
+
+    return file_path
+
+
+def test_system():
+    fs = 30_000.0
+    dur = 2.0
+    n_chans = 128
+    threshold = 2.5
+    rate_range = (1, 100)
+    chunk_dur = 0.02
+    chunk_len = int(fs * chunk_dur)
+
+    data = generate_white_noise_with_events(
+        fs, dur, n_chans, rate_range, chunk_dur, threshold
+    )
+    test_filename = get_test_fn()
+
+    comps = {
+        "SOURCE": ArrayChunker(data, chunk_len, fs=fs),
+        "THRESH": ThresholdCrossing(threshold=threshold),
+        "SINK": MessageLogger(output=test_filename),
+        "TERM": TerminateOnTotal(int(fs * dur / chunk_len))
+    }
+    conns = (
+        (comps["SOURCE"].OUTPUT_SIGNAL, comps["THRESH"].INPUT_SIGNAL),
+        (comps["THRESH"].OUTPUT_SIGNAL, comps["SINK"].INPUT_MESSAGE),
+        (comps["SINK"].OUTPUT_MESSAGE, comps["TERM"].INPUT_MESSAGE),
+    )
+    ez.run(components=comps, connections=conns)
+
+    messages = [_ for _ in message_log(test_filename)]
+    os.remove(test_filename)
+
+    for msg_ix, msg in enumerate(messages):
+        assert isinstance(msg.data, scipy.sparse.sparray)
+        assert msg.axes["time"].gain == 1 / fs
+        assert np.round(msg.axes["time"].offset, 3) == np.round(msg_ix * chunk_dur, 3)
