@@ -45,13 +45,12 @@ wheels = [
 
 [[package]]
 name = "ezmsg-event"
-version = "0.1.dev23+g5c6c343.d20241101"
+version = "0.2.dev0+g49ef8c1.d20241101"
 source = { editable = "." }
 dependencies = [
     { name = "ezmsg" },
     { name = "ezmsg-sigproc" },
     { name = "numpy" },
-    { name = "scipy" },
     { name = "sparse" },
 ]
 
@@ -72,7 +71,6 @@ requires-dist = [
     { name = "ezmsg-sigproc", specifier = ">=1.3.3" },
     { name = "numpy", specifier = ">=2.0.2" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3.3" },
-    { name = "scipy", specifier = ">=1.13.1" },
     { name = "sparse", specifier = ">=0.15.4" },
 ]
 

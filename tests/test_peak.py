@@ -4,9 +4,9 @@ import tempfile
 import typing
 
 import numpy as np
-import scipy.sparse
 import pytest
 import ezmsg.core as ez
+import sparse
 from ezmsg.util.messagecodec import message_log
 from ezmsg.util.messagelogger import MessageLogger
 from ezmsg.util.messages.chunker import array_chunker, ArrayChunker
@@ -60,9 +60,7 @@ def test_threshold_crossing(return_peak_val: bool):
     exp_feat_inds = np.array(exp_feat_inds)
     exp_samp_inds = np.array(exp_samp_inds)
 
-    import scipy.sparse
-
-    final_arr = scipy.sparse.hstack([_.data for _ in msgs_out])
+    final_arr = sparse.concatenate([_.data for _ in msgs_out], axis=1)
     feat_inds, samp_inds = final_arr.nonzero()
 
     """
@@ -138,6 +136,6 @@ def test_system():
     os.remove(test_filename)
 
     for msg_ix, msg in enumerate(messages):
-        assert isinstance(msg.data, scipy.sparse.sparray)
+        assert isinstance(msg.data, sparse.SparseArray)
         assert msg.axes["time"].gain == 1 / fs
         assert np.round(msg.axes["time"].offset, 3) == np.round(msg_ix * chunk_dur, 3)
