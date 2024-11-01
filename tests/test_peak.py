@@ -13,7 +13,7 @@ from ezmsg.util.messages.chunker import array_chunker, ArrayChunker
 from ezmsg.util.terminate import TerminateOnTotal
 
 from ezmsg.event.util.simulate import generate_white_noise_with_events
-from ezmsg.event.peak import threshold_crossing, ThresholdCrossing, ThresholdSettings
+from ezmsg.event.peak import threshold_crossing, ThresholdCrossing
 
 
 @pytest.mark.parametrize("return_peak_val", [True, False])
