@@ -27,7 +27,7 @@ def main(bin_duration: float = 0.05):
         "SOURCE": ArrayChunker(data, chunk_len, fs=fs),
         "THRESH": ThresholdCrossing(threshold=threshold),
         "RATE": EventRate(bin_duration=bin_duration),
-        "LOG10": Log(10),
+        "LOG10": Log(10, clip_zero=True),
         "SINK": DebugLog(),
         "TERM": TerminateOnTotal(n_chunks),
     }

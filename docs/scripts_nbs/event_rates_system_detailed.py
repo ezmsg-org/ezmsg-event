@@ -35,6 +35,7 @@ def main(bin_duration: float = 0.05):
             newaxis="win",
             window_dur=bin_duration,
             window_shift=bin_duration,
+            zero_pad_until="none",
         ),
         "AGG": RangedAggregate(
             axis="time", bands=[(0, bin_duration)], operation=AggregationFunction.SUM
@@ -42,7 +43,7 @@ def main(bin_duration: float = 0.05):
         "SCALE": Scale(1 / bin_duration),
         "DENSE": Densify(),
         "AXIS": ModifyAxis(name_map={"time": None, "win": "time"}),
-        "LOG10": Log(10),
+        "LOG10": Log(10, clip_zero=True),
         "SINK": DebugLog(),
         "TERM": TerminateOnTotal(n_chunks),
     }
