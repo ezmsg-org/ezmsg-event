@@ -31,7 +31,11 @@ def event_rate(
     msg_out = AxisArray(np.array([]), dims=[""])
 
     win_proc = windowing(
-        axis="time", newaxis="win", window_dur=bin_duration, window_shift=bin_duration, zero_pad_until="none",
+        axis="time",
+        newaxis="win",
+        window_dur=bin_duration,
+        window_shift=bin_duration,
+        zero_pad_until="none",
     )
     out_dims: typing.Optional[typing.List[str]] = None
     out_axes: typing.Optional[typing.Dict[str, AxisArray.Axis]] = None
