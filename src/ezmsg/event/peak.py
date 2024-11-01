@@ -12,7 +12,7 @@ from ezmsg.util.generator import consumer
 from ezmsg.sigproc.scaler import scaler_np
 import numpy as np
 import numpy.typing as npt
-import scipy.sparse
+import sparse
 
 from .message import EventMessage
 
@@ -110,7 +110,7 @@ def threshold_crossing(
                 else {"time": msg_in.axes["time"]}
             )
             template = AxisArray(
-                np.array([[]]), dims=[other_dim, "time"], axes=out_axes
+                sparse.SparseArray((0, 0)), dims=[other_dim, "time"], axes=out_axes
             )
 
         # Optionally scale data
@@ -294,10 +294,7 @@ def threshold_crossing(
         n_out_samps = hold_idx
         t0 = msg_in.axes["time"].offset - (n_prepended - 1) * msg_in.axes["time"].gain
         samp_idx -= 1  # Discard first prepended sample.
-        # TODO: Use pydata.sparse for ndim > 2  https://sparse.pydata.org/en/stable/
-        result = scipy.sparse.csr_array(
-            (result_val, (feat_idx, samp_idx)), shape=data.shape[:-1] + (n_out_samps,)
-        )
+        result = sparse.COO((feat_idx, samp_idx), data=result_val, shape=data.shape[:-1] + (n_out_samps,))
         msg_out = replace(
             template,
             data=result,

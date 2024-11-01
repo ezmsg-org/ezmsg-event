@@ -12,6 +12,7 @@ dependencies = [
     "ezmsg>=3.5.0",
     "numpy>=2.0.2",
     "scipy>=1.13.1",
+    "sparse>=0.15.4",
 ]
 
 [project.optional-dependencies]
