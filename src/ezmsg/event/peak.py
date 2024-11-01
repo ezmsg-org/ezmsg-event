@@ -294,7 +294,11 @@ def threshold_crossing(
         n_out_samps = hold_idx
         t0 = msg_in.axes["time"].offset - (n_prepended - 1) * msg_in.axes["time"].gain
         samp_idx -= 1  # Discard first prepended sample.
-        result = sparse.COO((feat_idx, samp_idx), data=result_val, shape=data.shape[:-1] + (n_out_samps,))
+        result = sparse.COO(
+            (feat_idx, samp_idx),
+            data=result_val,
+            shape=data.shape[:-1] + (n_out_samps,),
+        )
         msg_out = replace(
             template,
             data=result,
@@ -321,5 +325,5 @@ class ThresholdCrossing(GenAxisArray):
             refrac_dur=self.SETTINGS.refrac_dur,
             align_on_peak=self.SETTINGS.align_on_peak,
             return_peak_val=self.SETTINGS.return_peak_val,
-            auto_scale_tau=self.SETTINGS.auto_scale_tau
+            auto_scale_tau=self.SETTINGS.auto_scale_tau,
         )

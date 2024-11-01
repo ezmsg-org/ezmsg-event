@@ -1,7 +1,4 @@
-import math
-
 import numpy as np
-import pytest
 import sparse
 from ezmsg.util.messages.axisarray import AxisArray
 
@@ -22,7 +19,7 @@ def test_event_rate():
 
     in_msgs = [
         AxisArray(
-            data=s[chunk_ix * chunk_len:(chunk_ix + 1) * chunk_len],
+            data=s[chunk_ix * chunk_len : (chunk_ix + 1) * chunk_len],
             dims=["time", "ch"],
             axes={
                 "time": AxisArray.Axis.TimeAxis(fs=fs, offset=chunk_ix * chunk_dur),
@@ -40,11 +37,16 @@ def test_event_rate():
     for om_ix, om in enumerate(out_msgs):
         assert om.key == "test_event_rate"
         assert om.dims == ["time", "ch"]
-        assert om.data.shape == (int(chunk_dur / bin_dur), nchans)  # Only works if even multiple
+        assert om.data.shape == (
+            int(chunk_dur / bin_dur),
+            nchans,
+        )  # Only works if even multiple
         assert om.axes["time"].gain == bin_dur
         assert om.axes["time"].offset == om_ix * chunk_dur
 
     stack = AxisArray.concatenate(*out_msgs, dim="time")
-    expected = np.sum(s.todense().reshape(-1, int(fs * bin_dur), nchans), axis=1) / bin_dur
+    expected = (
+        np.sum(s.todense().reshape(-1, int(fs * bin_dur), nchans), axis=1) / bin_dur
+    )
     assert stack.data.shape == expected.shape
     assert np.allclose(stack.data, expected)

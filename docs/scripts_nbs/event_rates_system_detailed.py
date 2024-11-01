@@ -30,8 +30,15 @@ def main(bin_duration: float = 0.05):
     comps = {
         "SOURCE": ArrayChunker(data, chunk_len, fs=fs),
         "THRESH": ThresholdCrossing(threshold=threshold),
-        "WIN": Window(axis="time", newaxis="win", window_dur=bin_duration, window_shift=bin_duration),
-        "AGG": RangedAggregate(axis="time", bands=[(0, bin_duration)], operation=AggregationFunction.SUM),
+        "WIN": Window(
+            axis="time",
+            newaxis="win",
+            window_dur=bin_duration,
+            window_shift=bin_duration,
+        ),
+        "AGG": RangedAggregate(
+            axis="time", bands=[(0, bin_duration)], operation=AggregationFunction.SUM
+        ),
         "SCALE": Scale(1 / bin_duration),
         "DENSE": Densify(),
         "AXIS": ModifyAxis(name_map={"time": None, "win": "time"}),

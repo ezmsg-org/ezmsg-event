@@ -25,6 +25,7 @@ class DensifySettings(ez.Settings):
 
 class Densify(GenAxisArray):
     """:obj:`Unit` for :obj:`bandpower`."""
+
     SETTINGS = DensifySettings
 
     def construct_generator(self):

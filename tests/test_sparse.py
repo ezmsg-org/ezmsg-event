@@ -14,11 +14,7 @@ def test_to_dense(sparse_input: bool):
         data = sparse.random(arr_shape, density=0.1, random_state=rng)
     else:
         data = np.random.rand(*arr_shape)
-    in_msg = AxisArray(
-        data=data,
-        dims=["time", "ch", "freq"],
-        key="test_to_dense"
-    )
+    in_msg = AxisArray(data=data, dims=["time", "ch", "freq"], key="test_to_dense")
 
     proc = to_dense()
     out_msg = proc.send(in_msg)

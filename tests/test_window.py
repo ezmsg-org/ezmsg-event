@@ -26,7 +26,7 @@ def test_sparse_window(
             axes={
                 "time": AxisArray.Axis.TimeAxis(fs=fs, offset=msg_ix / fs),
             },
-            key="test_sparse_window"
+            key="test_sparse_window",
         )
         for msg_ix in range(10)
     ]

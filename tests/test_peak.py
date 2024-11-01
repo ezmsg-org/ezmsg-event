@@ -125,7 +125,7 @@ def test_system():
         "SOURCE": ArrayChunker(data, chunk_len, fs=fs),
         "THRESH": ThresholdCrossing(threshold=threshold),
         "SINK": MessageLogger(output=test_filename),
-        "TERM": TerminateOnTotal(int(fs * dur / chunk_len))
+        "TERM": TerminateOnTotal(int(fs * dur / chunk_len)),
     }
     conns = (
         (comps["SOURCE"].OUTPUT_SIGNAL, comps["THRESH"].INPUT_SIGNAL),

@@ -6,7 +6,11 @@ import sparse
 import ezmsg.core as ez
 from ezmsg.sigproc.base import GenAxisArray
 from ezmsg.util.generator import consumer
-from ezmsg.util.messages.axisarray import AxisArray, slice_along_axis, sliding_win_oneaxis
+from ezmsg.util.messages.axisarray import (
+    AxisArray,
+    slice_along_axis,
+    sliding_win_oneaxis,
+)
 
 from .util.array import sliding_win_oneaxis as sparse_sliding_win
 
@@ -96,7 +100,7 @@ def windowing(
             newaxis_warned = True
             newaxis = f"{newaxis}_win"
 
-        samp_shape = msg_in.data.shape[:axis_idx] + msg_in.data.shape[axis_idx + 1:]
+        samp_shape = msg_in.data.shape[:axis_idx] + msg_in.data.shape[axis_idx + 1 :]
 
         # If buffer unset or input stats changed, create a new buffer
         b_reset = buffer is None
@@ -122,7 +126,7 @@ def windowing(
             buffer = sparse.zeros(
                 msg_in.data.shape[:axis_idx]
                 + (n_zero,)
-                + msg_in.data.shape[axis_idx + 1:]
+                + msg_in.data.shape[axis_idx + 1 :]
             )
 
         # Add new data to buffer.
@@ -164,14 +168,18 @@ def windowing(
         if b_1to1:
             # one-to-one mode -- Each send yields exactly one window containing only the most recent samples.
             buffer = slice_along_axis(buffer, slice(-window_samples, None), axis_idx)
-            out_dat = buffer.reshape(buffer.shape[:axis_idx] + (1,) + buffer.shape[axis_idx:])
+            out_dat = buffer.reshape(
+                buffer.shape[:axis_idx] + (1,) + buffer.shape[axis_idx:]
+            )
             out_newaxis = replace(out_newaxis, offset=buffer_offset[-window_samples])
         elif buffer.shape[axis_idx] >= window_samples:
             # Deterministic window shifts.
-            out_dat = sparse_sliding_win(buffer, window_samples, axis_idx, step=window_shift_samples)
+            out_dat = sparse_sliding_win(
+                buffer, window_samples, axis_idx, step=window_shift_samples
+            )
             offset_view = sliding_win_oneaxis(buffer_offset, window_samples, 0)[
-                          ::window_shift_samples
-                          ]
+                ::window_shift_samples
+            ]
             out_newaxis = replace(out_newaxis, offset=offset_view[0, 0])
 
             # Drop expired beginning of buffer and update shift_deficit
@@ -181,9 +189,9 @@ def windowing(
         else:
             # Not enough data to make a new window. Return empty data.
             empty_data_shape = (
-                    msg_in.data.shape[:axis_idx]
-                    + (0, window_samples)
-                    + msg_in.data.shape[axis_idx + 1:]
+                msg_in.data.shape[:axis_idx]
+                + (0, window_samples)
+                + msg_in.data.shape[axis_idx + 1 :]
             )
             out_dat = sparse.zeros(empty_data_shape, dtype=msg_in.data.dtype)
             # out_newaxis will have first timestamp in input... but mostly meaningless because output is size-zero.
@@ -204,6 +212,7 @@ class WindowSettings(ez.Settings):
 
 class Window(GenAxisArray):
     """:obj:`Unit` for :obj:`bandpower`."""
+
     SETTINGS = WindowSettings
 
     def construct_generator(self):
