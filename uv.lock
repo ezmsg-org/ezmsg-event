@@ -33,22 +33,21 @@ wheels = [
 
 [[package]]
 name = "ezmsg"
-version = "3.5.0"
+version = "3.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/48/a7/7e228053869f41c9e71d7fca1111fffdb3716ec8307de1aca1b57c845d9d/ezmsg-3.5.0.tar.gz", hash = "sha256:1b08972f1231299b7148d383519374113e5b44e9eaf7bf287baa60be40aa21cd", size = 136358 }
+sdist = { url = "https://files.pythonhosted.org/packages/11/fa/b4dffddc08f608f5d69de7692a5c56a6f82c4f8cd0555628fe3627344d6e/ezmsg-3.6.0.tar.gz", hash = "sha256:978d8c8934fbda9feb236e1409d47d99c0631cd3e886469ceab6180f0fe3630a", size = 141506 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/92/53/42cfc9f0c5f1dfb4715b5e5dfe6abc279c4e83814488d1d5ecd361ec527b/ezmsg-3.5.0-py3-none-any.whl", hash = "sha256:f37864d46ecf5f75de5d8a89253f8c19563ecd5fe8beeddf2b334ef000319ff9", size = 67621 },
+    { url = "https://files.pythonhosted.org/packages/a9/22/02a78c0dd48a44ba4a57394d0917e1fe1223f5f1c81b93c5d3c9d9c9f6bf/ezmsg-3.6.0-py3-none-any.whl", hash = "sha256:adda57e28018474fdd601874d04a1a3e598422190f8ce31449b8c75525f1236d", size = 69895 },
 ]
 
 [[package]]
 name = "ezmsg-event"
-version = "0.2.dev2+g52a34fe.d20241101"
+version = "0.1.2.dev0+g8d9123b.d20241122"
 source = { editable = "." }
 dependencies = [
-    { name = "ezmsg" },
     { name = "ezmsg-sigproc" },
     { name = "numpy" },
     { name = "sparse" },
@@ -67,9 +66,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ezmsg", specifier = ">=3.5.0" },
-    { name = "ezmsg-sigproc", specifier = ">=1.3.3" },
-    { name = "numpy", specifier = ">=2.0.2" },
+    { name = "ezmsg-sigproc", specifier = ">=1.5.0" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3.3" },
     { name = "sparse", specifier = ">=0.15.4" },
 ]
@@ -82,7 +80,7 @@ dev = [
 
 [[package]]
 name = "ezmsg-sigproc"
-version = "1.4.2"
+version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ezmsg" },
@@ -90,9 +88,9 @@ dependencies = [
     { name = "pywavelets" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/30/b9/fa61371e1171d3f7fcf2620ed04783d3f8d192aa6a6b5204fb91d4987ab0/ezmsg_sigproc-1.4.2.tar.gz", hash = "sha256:b3c9dc4a123ea1db2b27641b8ac778e1313a4119bd841ad4b9482fdd103b2dcd", size = 103734 }
+sdist = { url = "https://files.pythonhosted.org/packages/e9/5f/ab86ad8e04eb9a742332d60c41b47b8bf4ed4037abe7c44ade38148e7a12/ezmsg_sigproc-1.5.0.tar.gz", hash = "sha256:ef4e1f47312fc3f799864bd1a8681cfe05d41450eee450f4cc81d3495ede3d41", size = 104665 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/9c/b9717b9c1f3cb76c167e2bbac40dc7f2e58fdff0773ffb84bee0f45996a2/ezmsg_sigproc-1.4.2-py3-none-any.whl", hash = "sha256:d0804b19c1bced30753f033330a7b6c730c60df11aa3e701779dba080a76b020", size = 53571 },
+    { url = "https://files.pythonhosted.org/packages/7c/f8/7ba08af7a0cdad8515b764683feec604efe87de68ef3029425d682fdbf59/ezmsg_sigproc-1.5.0-py3-none-any.whl", hash = "sha256:33f2690a0e92a957cc4c3f074d728079cca553e928c173e1cc40b55a28729949", size = 54191 },
 ]
 
 [[package]]
