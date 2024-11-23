@@ -11,7 +11,6 @@ dependencies = [
     "ezmsg-sigproc>=1.6.0",
     "numpy>=1.26",
     "sparse>=0.15.4",
-    "torch>=2.5.1",
 ]
 
 [project.optional-dependencies]
