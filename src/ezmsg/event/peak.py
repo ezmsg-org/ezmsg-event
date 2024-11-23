@@ -26,7 +26,7 @@ def threshold_crossing(
     return_peak_val: bool = False,
     auto_scale_tau: float = 0.0,
 ) -> typing.Generator[
-    typing.Union[typing.List[EventMessage], AxisArray], AxisArray, None
+    list[EventMessage] | AxisArray, AxisArray, None
 ]:
     """
     Detect threshold crossing events.
@@ -52,31 +52,29 @@ def threshold_crossing(
     msg_out = AxisArray(np.array([]), dims=[""])
 
     # Initialize state variables
-    sample_shape: typing.Optional[typing.Tuple[int, ...]] = None
-    fs: typing.Optional[float] = None
+    sample_shape: tuple[int, ...] | None = None
+    fs: float | None = None
     max_width: int = 0
     min_width: int = 1  # Consider making this a parameter.
     refrac_width: int = 0
 
-    scaler: typing.Optional[typing.Generator[AxisArray, AxisArray, None]] = None
+    scaler: typing.Generator[AxisArray, AxisArray, None] | None = None
     # adaptive z-scoring.
     # TODO: This sample-by-sample adaptation is probably overkill. ezmsg-sigproc should add chunk-wise scaler updating.
 
-    _overs: typing.Optional[npt.NDArray] = (
-        None  # (n_feats, <=max_width) int == -1 or +1
-    )
+    _overs: npt.NDArray | None = None  # (n_feats, <=max_width) int == -1 or +1
     # Trailing buffer to track whether the previous sample(s) were past threshold.
 
-    _data: typing.Optional[npt.NDArray] = None  # (n_feats, <=max_width) in_dtype
+    _data: npt.NDArray | None = None  # (n_feats, <=max_width) in_dtype
     # Trailing buffer in case peak spans sample chunks. Only used if align_on_peak or return_peak_val.
 
-    _data_raw: typing.Optional[npt.NDArray] = None  # (n_feats, <=max_width) in_dtype
+    _data_raw: npt.NDArray | None = None  # (n_feats, <=max_width) in_dtype
     # Only used if return_peak_val and scaler is not None
 
-    _elapsed: typing.Optional[npt.NDArray] = None  # (n_feats,) int
+    _elapsed: npt.NDArray | None = None  # (n_feats,) int
     # Number of samples since last event. Used to enforce refractory period across iterations.
     #
-    # _n_skip: typing.Optional[npt.NDArray] = None  # (n_feats,) int
+    # _n_skip: npt.NDArray | None = None  # (n_feats,) int
 
     while True:
         msg_in: AxisArray = yield msg_out
@@ -114,7 +112,7 @@ def threshold_crossing(
             )
 
         # Optionally scale data
-        data_raw: typing.Optional[npt.NDArray] = None
+        data_raw: npt.NDArray | None = None
         if scaler is not None:
             if return_peak_val:
                 data_raw = msg_in.data.copy()
