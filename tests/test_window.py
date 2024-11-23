@@ -1,5 +1,3 @@
-import typing
-
 import numpy as np
 import pytest
 import sparse
@@ -13,7 +11,7 @@ from ezmsg.event.window import windowing
 @pytest.mark.parametrize("zero_pad", ["input", "shift", "none"])
 def test_sparse_window(
     win_dur: float,
-    win_shift: typing.Optional[float],
+    win_shift: float | None,
     zero_pad: str,
 ):
     fs = 100.0

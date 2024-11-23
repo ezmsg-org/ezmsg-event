@@ -17,10 +17,10 @@ from .util.array import sliding_win_oneaxis as sparse_sliding_win
 
 @consumer
 def windowing(
-    axis: typing.Optional[str] = None,
+    axis: str | None = None,
     newaxis: str = "win",
-    window_dur: typing.Optional[float] = None,
-    window_shift: typing.Optional[float] = None,
+    window_dur: float | None = None,
+    window_shift: float | None = None,
     zero_pad_until: str = "input",
 ) -> typing.Generator[AxisArray, AxisArray, None]:
     """
@@ -70,14 +70,14 @@ def windowing(
     msg_out = AxisArray(np.array([]), dims=[""])
 
     # State variables
-    buffer: typing.Optional[sparse.SparseArray] = None
-    window_samples: typing.Optional[int] = None
-    window_shift_samples: typing.Optional[int] = None
+    buffer: sparse.SparseArray | None = None
+    window_samples: int | None = None
+    window_shift_samples: int | None = None
     shift_deficit: int = 0
     b_1to1 = window_shift is None
     newaxis_warned: bool = b_1to1
-    out_newaxis: typing.Optional[AxisArray.Axis] = None
-    out_dims: typing.Optional[typing.List[str]] = None
+    out_newaxis: AxisArray.Axis | None = None
+    out_dims: list[str] | None = None
 
     check_inputs = {"samp_shape": None, "fs": None, "key": None}
 
@@ -203,10 +203,10 @@ def windowing(
 
 
 class WindowSettings(ez.Settings):
-    axis: typing.Optional[str] = None
-    newaxis: typing.Optional[str] = None  # new axis for output. No new axes if None
-    window_dur: typing.Optional[float] = None  # Sec. passthrough if None
-    window_shift: typing.Optional[float] = None  # Sec. Use "1:1 mode" if None
+    axis: str | None = None
+    newaxis: str | None = None  # new axis for output. No new axes if None
+    window_dur: float | None = None  # Sec. passthrough if None
+    window_shift: float | None = None  # Sec. Use "1:1 mode" if None
     zero_pad_until: str = "full"  # "full", "shift", "input", "none"
 
 

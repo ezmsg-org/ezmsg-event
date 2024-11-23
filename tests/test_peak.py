@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import tempfile
-import typing
 
 import numpy as np
 import pytest
@@ -86,7 +85,7 @@ def test_threshold_crossing(return_peak_val: bool):
     assert np.array_equal(feat_inds, exp_feat_inds)
 
 
-def get_test_fn(test_name: typing.Optional[str] = None, extension: str = "txt") -> Path:
+def get_test_fn(test_name: str | None = None, extension: str = "txt") -> Path:
     """PYTEST compatible temporary test file creator"""
     if test_name is None:
         test_name = os.environ.get("PYTEST_CURRENT_TEST")

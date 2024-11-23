@@ -37,8 +37,8 @@ def event_rate(
         window_shift=bin_duration,
         zero_pad_until="none",
     )
-    out_dims: typing.Optional[typing.List[str]] = None
-    out_axes: typing.Optional[typing.Dict[str, AxisArray.Axis]] = None
+    out_dims: list[str] | None = None
+    out_axes: dict[str, AxisArray.Axis] | None = None
 
     while True:
         msg_in: AxisArray = yield msg_out
