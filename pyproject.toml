@@ -8,7 +8,7 @@ readme = "README.md"
 requires-python = ">=3.10.15"
 dynamic = ["version"]
 dependencies = [
-    "ezmsg-sigproc>=1.6.0",
+    "ezmsg-sigproc",
     "numpy>=1.26",
     "sparse>=0.15.4",
 ]
@@ -34,3 +34,6 @@ version-file = "src/ezmsg/event/__version__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ezmsg"]
+
+[tool.uv.sources]
+ezmsg-sigproc = { git = "https://github.com/ezmsg-org/ezmsg-sigproc.git", branch = "70-use-protocols-for-axisarray-transformers" }
