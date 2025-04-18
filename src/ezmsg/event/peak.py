@@ -66,9 +66,6 @@ class ThresholdCrossingState:
     elapsed: npt.NDArray | None = None
     """Track number of samples since last event for each feature. Used especially for refractory period."""
 
-    template: AxisArray = None
-    """Template for the output message to reduce memory allocation. TODO: Maybe unnecessary."""
-
 
 class ThresholdCrossingTransformer(
     BaseStatefulTransformer[
@@ -333,7 +330,7 @@ class ThresholdCrossingTransformer(
             message,
             data=result,
             axes={
-                **self._state.template.axes,
+                **message.axes,
                 "time": replace(message.axes["time"], offset=t0),
             },
         )
