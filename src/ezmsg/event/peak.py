@@ -294,7 +294,7 @@ class ThresholdCrossingTransformer(
                 if self.settings.return_peak_val:
                     # We need the actual peak value.
                     peak_inds_tuple = (
-                        cross_idx
+                        tuple(cross_idx)
                         if self.settings.align_on_peak
                         else tuple(cross_idx[:-1]) + (cross_idx[-1] + pk_offset,)
                     )
