@@ -13,13 +13,17 @@ dependencies = [
     "sparse>=0.15.4",
 ]
 
-[project.optional-dependencies]
-test = [
-    "pytest>=8.3.3",
-]
+[dependency-groups]
 dev = [
-    "ruff>=0.6.8",
-    "typer>=0.12.5",
+  "typer",
+  {include-group = "lint"},
+  {include-group = "test"},
+]
+lint = [
+  "ruff"
+]
+test = [
+  "pytest"
 ]
 
 [build-system]
