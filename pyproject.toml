@@ -8,9 +8,10 @@ readme = "README.md"
 requires-python = ">=3.10.15"
 dynamic = ["version"]
 dependencies = [
-    "ezmsg-sigproc",
-    "numpy>=1.26",
-    "sparse>=0.15.4",
+    "ezmsg-sigproc>=2.1.0",
+    "ezmsg>=3.6.1",
+    "sparse>=0.17.0",
+    "numpy>=2.2.6",
 ]
 
 [dependency-groups]
