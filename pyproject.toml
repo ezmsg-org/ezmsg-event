@@ -8,18 +8,30 @@ readme = "README.md"
 requires-python = ">=3.10.15"
 dynamic = ["version"]
 dependencies = [
-    "ezmsg-sigproc>=1.6.0",
-    "numpy>=1.26",
-    "sparse>=0.15.4",
+    "ezmsg-sigproc>=2.2.0",
+    "ezmsg>=3.6.1",
+    "sparse>=0.17.0",
+    "numpy>=2.2.6",
 ]
 
-[project.optional-dependencies]
-test = [
-    "pytest>=8.3.3",
-]
+[dependency-groups]
 dev = [
-    "ruff>=0.6.8",
-    "typer>=0.12.5",
+  "typer",
+  {include-group = "lint"},
+  {include-group = "test"},
+]
+lint = [
+  "ruff"
+]
+test = [
+  "pytest"
+]
+docs = [
+  "sphinx>=7.0",
+  "sphinx-autodoc-typehints",
+  "sphinx-copybutton",
+  "pydata-sphinx-theme",
+  "myst-parser",
 ]
 
 [build-system]
