@@ -6,10 +6,13 @@ from ezmsg.sigproc.base import (
     CompositeProcessor,
     BaseTransformerUnit,
 )
+from ezmsg.sigproc.aggregate import (
+    AggregateTransformer,
+    AggregateSettings,
+    AggregationFunction,
+)
 from ezmsg.sigproc.window import WindowTransformer, WindowSettings
 from ezmsg.util.messages.axisarray import AxisArray, replace
-
-from .aggregate import Aggregate, AggregateSettings
 
 
 class EventRateSettings(ez.Settings):
@@ -39,9 +42,7 @@ class RenameAxis(BaseTransformer[RenameAxisSettings, AxisArray, AxisArray]):
             idx = new_dims.index(self.settings.old_axis)
             new_dims[idx] = self.settings.new_axis
             if self.settings.old_axis in new_axes:
-                new_axes[self.settings.new_axis] = new_axes.pop(
-                    self.settings.old_axis
-                )
+                new_axes[self.settings.new_axis] = new_axes.pop(self.settings.old_axis)
 
         return replace(message, dims=new_dims, axes=new_axes)
 
@@ -61,10 +62,10 @@ class Rate(CompositeProcessor[EventRateSettings, AxisArray, AxisArray]):
                     zero_pad_until="none",
                 )
             ),
-            "aggregate": Aggregate(AggregateSettings(axis="time", operator="sum")),
-            "rename": RenameAxis(
-                RenameAxisSettings(old_axis="win", new_axis="time")
+            "aggregate": AggregateTransformer(
+                AggregateSettings(axis="time", operation=AggregationFunction.SUM)
             ),
+            "rename": RenameAxis(RenameAxisSettings(old_axis="win", new_axis="time")),
             "densify_and_scale": DensifyAndScale(
                 DensifyAndScaleSettings(scale=1.0 / settings.bin_duration)
             ),
