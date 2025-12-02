@@ -4,11 +4,11 @@ import numpy as np
 import sparse
 from ezmsg.util.messages.axisarray import AxisArray
 
-from ezmsg.event.rate import Rate, EventRateSettings
+from ezmsg.event.binned import BinnedEventAggregator, BinnedEventAggregatorSettings
 
 
-def test_event_rate_composite():
-    dur = 1.0
+def test_event_rate_binned():
+    dur = 1.1
     fs = 30_000.0
     chunk_dur = 0.1
     bin_dur = 0.03
@@ -30,10 +30,14 @@ def test_event_rate_composite():
         for chunk_ix in range(nchunk)
     ]
 
-    proc = Rate(settings=EventRateSettings(bin_duration=bin_dur))
+    proc = BinnedEventAggregator(
+        settings=BinnedEventAggregatorSettings(bin_duration=bin_dur)
+    )
 
+    # Calculate the first message which sometimes takes longer due to initialization
     out_msgs = [proc(in_msgs[0])]
 
+    # Make sure the first output message has the correct shape
     assert out_msgs[0].data.shape[0] == int(chunk_dur / bin_dur)
 
     # Calculate the remaining messages within perf_counters and assert they are processed quickly
@@ -41,19 +45,16 @@ def test_event_rate_composite():
     out_msgs.extend([proc(in_msg) for in_msg in in_msgs[1:]])
     t_elapsed = time.perf_counter() - t_start
     assert len(out_msgs) == nchunk
-    _ = t_elapsed < (dur - chunk_dur)  # Ensure processing is fast enough
+    assert t_elapsed < 0.5 * (dur - chunk_dur)  # Ensure processing is fast enough
 
-    n_bins_seen = 0
-    for om_ix, om in enumerate(out_msgs):
-        assert om.dims == ["time", "ch"]
-        assert np.isclose(om.axes["time"].gain, bin_dur)
-        assert np.isclose(om.axes["time"].offset, n_bins_seen * bin_dur)
-        n_bins_seen += om.shape[0]
-
-    stack = AxisArray.concatenate(*out_msgs, dim="time")
-    t_proc = n_bins_seen * bin_dur
-    samp_proc = int(t_proc * fs)
-    s_proc = s[:samp_proc].todense().reshape(-1, int(fs * bin_dur), nchans)
-    expected = np.sum(s_proc, axis=1) / bin_dur
-    assert stack.data.shape == expected.shape
-    assert np.allclose(stack.data, expected)
+    # Calculate the expected output and assert correctness
+    n_binnable = int(dur / bin_dur)
+    samps_per_bin = int(bin_dur * fs)
+    expected = (
+        s[: n_binnable * samps_per_bin]
+        .reshape((n_binnable, samps_per_bin, -1))
+        .sum(axis=1)
+    )
+    stacked = AxisArray.concatenate(*out_msgs, dim="time")
+    assert stacked.data.shape == expected.shape
+    assert np.array_equal(stacked.data, expected.todense() / bin_dur)
