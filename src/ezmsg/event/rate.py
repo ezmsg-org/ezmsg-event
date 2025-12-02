@@ -1,81 +1,80 @@
-"""
-Count number of events in a given time window. Optionally, divide by window duration to get rate.
-"""
-
-from dataclasses import replace
 import typing
 
-import numpy as np
 import ezmsg.core as ez
-from ezmsg.util.messages.axisarray import AxisArray
-from ezmsg.util.generator import consumer
-from ezmsg.sigproc.base import GenAxisArray
-from ezmsg.sigproc.window import windowing
-
-
-@consumer
-def event_rate(
-    bin_duration: float = 0.05,
-) -> typing.Generator[AxisArray, AxisArray, None]:
-    """
-
-
-    Args:
-        bin_duration:
-
-    Returns:
-        A primed generator object that yields an :obj:`AxisArray` object of event rates for every
-        :obj:`AxisArray` of sparse events it receives via `send`.
-    """
-    msg_out = AxisArray(np.array([]), dims=[""])
-
-    win_proc = windowing(
-        axis="time",
-        newaxis="win",
-        window_dur=bin_duration,
-        window_shift=bin_duration,
-        zero_pad_until="none",
-    )
-    out_dims: list[str] | None = None
-    out_axes: dict[str, AxisArray.Axis] | None = None
-
-    while True:
-        msg_in: AxisArray = yield msg_out
-
-        win_msg = win_proc.send(msg_in)
-
-        b_reset = out_dims is None
-        if b_reset:
-            # Fixup `dims`
-            out_dims = list(win_msg.dims)
-            out_dims.remove("time")
-            out_dims[out_dims.index("win")] = "time"
-            # Fixup axes
-            out_axes = {k: v for k, v in win_msg.axes.items() if k != "time"}
-
-        # Sum over time
-        time_ax = win_msg.get_axis_idx("time")
-        counts_per_bin = np.sum(win_msg.data, axis=time_ax)
-        # Scale by 1 / bin_duration to get rates
-        rates_per_bin = counts_per_bin / bin_duration
-        # Densify
-        rates_per_bin = rates_per_bin.todense()
-        msg_out = replace(
-            win_msg,
-            data=rates_per_bin,
-            dims=out_dims,
-            axes={**out_axes, "time": win_msg.axes["win"]},
-        )
+from ezmsg.sigproc.base import (
+    BaseTransformer,
+    CompositeProcessor,
+    BaseTransformerUnit,
+)
+from ezmsg.sigproc.aggregate import (
+    AggregateTransformer,
+    AggregateSettings,
+    AggregationFunction,
+)
+from ezmsg.sigproc.window import WindowTransformer, WindowSettings
+from ezmsg.util.messages.axisarray import AxisArray, replace
 
 
 class EventRateSettings(ez.Settings):
     bin_duration: float = 0.05
 
 
-class EventRate(GenAxisArray):
-    SETTINGS = EventRateSettings
+class DensifyAndScaleSettings(ez.Settings):
+    scale: float = 1.0
 
-    def construct_generator(self):
-        self.STATE.gen = event_rate(
-            bin_duration=self.SETTINGS.bin_duration,
-        )
+
+class DensifyAndScale(BaseTransformer[DensifyAndScaleSettings, AxisArray, AxisArray]):
+    def _process(self, message: AxisArray) -> AxisArray:
+        return replace(message, data=(message.data.todense() * self.settings.scale))
+
+
+class RenameAxisSettings(ez.Settings):
+    old_axis: str
+    new_axis: str
+
+
+class RenameAxis(BaseTransformer[RenameAxisSettings, AxisArray, AxisArray]):
+    """
+    Note: If you only require a Unit, then look to `ezmsg.util.messages.modify.ModifyAxis`.
+    Unfortunately, that module is not available as a transformer and cannot be included in a CompositeProcessor.
+    """
+    def _process(self, message: AxisArray) -> AxisArray:
+        new_dims = list(message.dims)
+        new_axes = dict(message.axes)
+
+        if self.settings.old_axis in new_dims:
+            idx = new_dims.index(self.settings.old_axis)
+            new_dims[idx] = self.settings.new_axis
+            if self.settings.old_axis in new_axes:
+                new_axes[self.settings.new_axis] = new_axes.pop(self.settings.old_axis)
+
+        return replace(message, dims=new_dims, axes=new_axes)
+
+
+class Rate(CompositeProcessor[EventRateSettings, AxisArray, AxisArray]):
+    @staticmethod
+    def _initialize_processors(
+        settings: EventRateSettings,
+    ) -> dict[str, typing.Any]:
+        return {
+            "window": WindowTransformer(
+                WindowSettings(
+                    axis="time",
+                    newaxis="win",
+                    window_dur=settings.bin_duration,
+                    window_shift=settings.bin_duration,
+                    zero_pad_until="none",
+                )
+            ),
+            "aggregate": AggregateTransformer(
+                AggregateSettings(axis="time", operation=AggregationFunction.SUM)
+            ),
+            "rename": RenameAxis(RenameAxisSettings(old_axis="win", new_axis="time")),
+            "densify_and_scale": DensifyAndScale(
+                DensifyAndScaleSettings(scale=1.0 / settings.bin_duration)
+            ),
+        }
+
+
+class EventRate(BaseTransformerUnit[EventRateSettings, AxisArray, AxisArray, Rate]):
+    SETTINGS = EventRateSettings
