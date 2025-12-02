@@ -34,6 +34,10 @@ class RenameAxisSettings(ez.Settings):
 
 
 class RenameAxis(BaseTransformer[RenameAxisSettings, AxisArray, AxisArray]):
+    """
+    Note: If you only require a Unit, then look to `ezmsg.util.messages.modify.ModifyAxis`.
+    Unfortunately, that module is not available as a transformer and cannot be included in a CompositeProcessor.
+    """
     def _process(self, message: AxisArray) -> AxisArray:
         new_dims = list(message.dims)
         new_axes = dict(message.axes)
