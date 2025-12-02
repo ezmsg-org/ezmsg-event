@@ -3,7 +3,11 @@ import numba
 import numpy as np
 import numpy.typing as npt
 import sparse
-from ezmsg.sigproc.base import BaseStatefulTransformer, BaseTransformerUnit, processor_state
+from ezmsg.sigproc.base import (
+    BaseStatefulTransformer,
+    BaseTransformerUnit,
+    processor_state,
+)
 from ezmsg.util.messages.axisarray import AxisArray
 from ezmsg.util.messages.util import replace
 

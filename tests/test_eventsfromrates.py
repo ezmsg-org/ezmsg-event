@@ -31,9 +31,7 @@ def make_rate_message(
         dims=["time", "ch"],
         axes={
             "time": LinearAxis.create_time_axis(fs=fs, offset=time_offset),
-            "ch": CoordinateAxis(
-                data=np.arange(n_channels).astype(str), dims=["ch"]
-            ),
+            "ch": CoordinateAxis(data=np.arange(n_channels).astype(str), dims=["ch"]),
         },
     )
 
@@ -130,7 +128,9 @@ class TestEventsFromRatesTransformer:
         for chunk_idx in range(10):
             rates = np.full((n_bins_per_chunk, n_channels), rate)
             time_offset = chunk_idx * n_bins_per_chunk * bin_duration
-            msg = make_rate_message(rates, bin_duration=bin_duration, time_offset=time_offset)
+            msg = make_rate_message(
+                rates, bin_duration=bin_duration, time_offset=time_offset
+            )
 
             result = transformer(msg)
             total_events += result.data.nnz
@@ -185,7 +185,7 @@ class TestEventsFromRatesTransformer:
         result1 = transformer(msg1)
 
         # Store the state after high-rate processing
-        accumulated_after_high = transformer.state.accumulated.copy()
+        _ = transformer.state.accumulated.copy()
 
         # Second chunk: very low rate
         low_rates = np.full((50, n_channels), 0.1)  # 0.1 Hz - very low
