@@ -42,7 +42,7 @@ def test_event_rate_composite():
     out_msgs.extend([proc(in_msg) for in_msg in in_msgs[1:]])
     t_elapsed = time.perf_counter() - t_start
     assert len(out_msgs) == nchunk
-    # assert t_elapsed < (dur - chunk_dur)  # Ensure processing is fast enough
+    _ = t_elapsed < (dur - chunk_dur)  # Ensure processing is fast enough
 
     n_bins_seen = 0
     for om_ix, om in enumerate(out_msgs):
@@ -83,7 +83,9 @@ def test_event_rate_binned():
         for chunk_ix in range(nchunk)
     ]
 
-    proc = BinnedEventAggregator(settings=BinnedEventAggregatorSettings(bin_duration=bin_dur))
+    proc = BinnedEventAggregator(
+        settings=BinnedEventAggregatorSettings(bin_duration=bin_dur)
+    )
 
     # Calculate the first message which sometimes takes longer due to initialization
     out_msgs = [proc(in_msgs[0])]
@@ -101,7 +103,11 @@ def test_event_rate_binned():
     # Calculate the expected output and assert correctness
     n_binnable = int(dur / bin_dur)
     samps_per_bin = int(bin_dur * fs)
-    expected = s[:n_binnable * samps_per_bin].reshape((n_binnable, samps_per_bin, -1)).sum(axis=1)
+    expected = (
+        s[: n_binnable * samps_per_bin]
+        .reshape((n_binnable, samps_per_bin, -1))
+        .sum(axis=1)
+    )
     stacked = AxisArray.concatenate(*out_msgs, dim="time")
     assert stacked.data.shape == expected.shape
     assert np.array_equal(stacked.data, expected.todense() / bin_dur)
