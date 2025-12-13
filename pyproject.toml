@@ -58,7 +58,7 @@ exclude = ["*/__version__.py"]
 select = ["E", "F", "I", "W"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["ezmsg.package"]
+known-first-party = ["ezmsg.event"]
 known-third-party = ["ezmsg"]
 
 [tool.uv.sources]
