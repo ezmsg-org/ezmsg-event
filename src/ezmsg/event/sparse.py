@@ -1,8 +1,8 @@
 from dataclasses import replace
 
 import ezmsg.core as ez
+from ezmsg.baseproc import BaseTransformer, BaseTransformerUnit
 from ezmsg.util.messages.axisarray import AxisArray
-from ezmsg.sigproc.base import BaseTransformer, BaseTransformerUnit
 
 
 class DensifySettings(ez.Settings):
@@ -17,7 +17,5 @@ class DensifyTransformer(BaseTransformer[DensifySettings, AxisArray, AxisArray])
             return message
 
 
-class DensifyUnit(
-    BaseTransformerUnit[DensifySettings, AxisArray, AxisArray, DensifyTransformer]
-):
+class DensifyUnit(BaseTransformerUnit[DensifySettings, AxisArray, AxisArray, DensifyTransformer]):
     SETTINGS = DensifySettings

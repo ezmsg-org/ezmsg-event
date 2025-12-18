@@ -1,9 +1,9 @@
+import ezmsg.core as ez
 import numpy as np
 import numpy.typing as npt
 import sparse
-import ezmsg.core as ez
+from ezmsg.baseproc import BaseStatefulTransformer, processor_state
 from ezmsg.util.messages.axisarray import AxisArray, replace
-from ezmsg.sigproc.base import BaseStatefulTransformer, processor_state
 
 
 class RefractorySettings(ez.Settings):
@@ -19,9 +19,7 @@ class Refractory:
     """Track number of samples since last event for each feature."""
 
 
-class RefractoryTransformer(
-    BaseStatefulTransformer[RefractorySettings, AxisArray, AxisArray, Refractory]
-):
+class RefractoryTransformer(BaseStatefulTransformer[RefractorySettings, AxisArray, AxisArray, Refractory]):
     def _hash_message(self, message: AxisArray) -> int:
         return super()._hash_message(message)
 
@@ -102,9 +100,7 @@ class RefractoryTransformer(
         # For features that had events, set elapsed to time since last event
         if len(samp_idx) > 0:
             # Get the last event time for each feature that had events
-            uq_final_feats, last_idx = np.unique(
-                ravel_feat_inds[::-1], return_index=True
-            )
+            uq_final_feats, last_idx = np.unique(ravel_feat_inds[::-1], return_index=True)
             last_idx = len(ravel_feat_inds) - 1 - last_idx
             last_samps = samp_idx[last_idx]
             self._state.elapsed[uq_final_feats] = n_samps - last_samps

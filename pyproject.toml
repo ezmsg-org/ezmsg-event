@@ -8,6 +8,7 @@ readme = "README.md"
 requires-python = ">=3.10.15"
 dynamic = ["version"]
 dependencies = [
+    "ezmsg-baseproc",
     "ezmsg-sigproc>=2.4.0",
     "ezmsg>=3.6.1",
     "sparse>=0.17.0",
@@ -64,3 +65,4 @@ known-third-party = ["ezmsg"]
 [tool.uv.sources]
 # Uncomment to use development version of ezmsg from git
 #ezmsg = { git = "https://github.com/ezmsg-org/ezmsg.git", branch = "dev" }
+ezmsg-baseproc = { path = "../ezmsg-baseproc", editable = true }

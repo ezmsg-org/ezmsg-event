@@ -1,8 +1,7 @@
 import ezmsg.core as ez
 import numpy as np
 import numpy.typing as npt
-
-from ezmsg.sigproc.base import (
+from ezmsg.baseproc import (
     BaseStatefulTransformer,
     BaseTransformerUnit,
     processor_state,
@@ -33,9 +32,7 @@ class BinnedEventAggregatorState:
 
 
 class BinnedEventAggregator(
-    BaseStatefulTransformer[
-        BinnedEventAggregatorSettings, AxisArray, AxisArray, BinnedEventAggregatorState
-    ]
+    BaseStatefulTransformer[BinnedEventAggregatorSettings, AxisArray, AxisArray, BinnedEventAggregatorState]
 ):
     def _hash_message(self, message: AxisArray) -> int:
         targ_ax_idx = message.get_axis_idx(self.settings.axis)
@@ -45,9 +42,7 @@ class BinnedEventAggregator(
     def _reset_state(self, message: AxisArray) -> None:
         self._state.n_overflow = 0
         targ_axis_idx = message.get_axis_idx(self.settings.axis)
-        buff_shape = (
-            message.data.shape[:targ_axis_idx] + message.data.shape[targ_axis_idx + 1 :]
-        )
+        buff_shape = message.data.shape[:targ_axis_idx] + message.data.shape[targ_axis_idx + 1 :]
         self._state.counts_in_overflow = np.zeros(buff_shape, dtype=np.int64)
 
     def _process(self, message: AxisArray) -> AxisArray:
@@ -63,20 +58,17 @@ class BinnedEventAggregator(
         n_prev_overflow = self._state.n_overflow
 
         if self._state.n_overflow > 0:
-            # Calculate how many samples from the input msg we can fit into the first bin, given the current overflow state
+            # Calculate how many samples from the input msg we can fit into the first bin,
+            # given the current overflow state
             n_first = samples_per_bin - self._state.n_overflow
             # Sum the number of samples in the first bin then add to self._state.counts_in_overflow
             var_slice[targ_ax_idx] = slice(0, n_first)
-            first_bin_counts = (
-                message.data[tuple(var_slice)].sum(axis=targ_ax_idx).todense()
-            )
+            first_bin_counts = message.data[tuple(var_slice)].sum(axis=targ_ax_idx).todense()
             first_bin_counts += self._state.counts_in_overflow
         else:
             n_first = 0
             first_bin_counts = self._state.counts_in_overflow
-            assert np.all(first_bin_counts == 0), (
-                "Overflow state should be zeroed out from previous iteration."
-            )
+            assert np.all(first_bin_counts == 0), "Overflow state should be zeroed out from previous iteration."
 
         # Calculate how many samples remain after the first bin
         n_remaining = message.data.shape[targ_ax_idx] - n_first
@@ -93,20 +85,14 @@ class BinnedEventAggregator(
             + (n_full_bins, samples_per_bin)
             + full_bins_data.shape[targ_ax_idx + 1 :]
         )
-        middle_bin_counts = (
-            full_bins_data.reshape(new_shape).sum(axis=targ_ax_idx + 1).todense()
-        )
+        middle_bin_counts = full_bins_data.reshape(new_shape).sum(axis=targ_ax_idx + 1).todense()
 
         # Prepare output
         if self._state.n_overflow > 0:
             first_bin_counts = first_bin_counts.reshape(
-                first_bin_counts.shape[:targ_ax_idx]
-                + (1,)
-                + first_bin_counts.shape[targ_ax_idx:]
+                first_bin_counts.shape[:targ_ax_idx] + (1,) + first_bin_counts.shape[targ_ax_idx:]
             )
-            output_data = np.concatenate(
-                [first_bin_counts, middle_bin_counts], axis=targ_ax_idx
-            )
+            output_data = np.concatenate([first_bin_counts, middle_bin_counts], axis=targ_ax_idx)
         else:
             output_data = middle_bin_counts
 
@@ -123,10 +109,7 @@ class BinnedEventAggregator(
         out_msg = replace(
             message,
             data=output_data,
-            axes={
-                k: v if k != self.settings.axis else out_axis
-                for k, v in message.axes.items()
-            },
+            axes={k: v if k != self.settings.axis else out_axis for k, v in message.axes.items()},
         )
 
         # Calculate and store the overflow state.
@@ -139,8 +122,6 @@ class BinnedEventAggregator(
 
 
 class BinnedEventAggregatorUnit(
-    BaseTransformerUnit[
-        BinnedEventAggregatorSettings, AxisArray, AxisArray, BinnedEventAggregator
-    ]
+    BaseTransformerUnit[BinnedEventAggregatorSettings, AxisArray, AxisArray, BinnedEventAggregator]
 ):
     SETTINGS = BinnedEventAggregatorSettings

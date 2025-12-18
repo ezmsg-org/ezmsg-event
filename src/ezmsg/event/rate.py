@@ -1,17 +1,17 @@
 import typing
 
 import ezmsg.core as ez
-from ezmsg.sigproc.base import (
+from ezmsg.baseproc import (
     BaseTransformer,
-    CompositeProcessor,
     BaseTransformerUnit,
+    CompositeProcessor,
 )
 from ezmsg.sigproc.aggregate import (
-    AggregateTransformer,
     AggregateSettings,
+    AggregateTransformer,
     AggregationFunction,
 )
-from ezmsg.sigproc.window import WindowTransformer, WindowSettings
+from ezmsg.sigproc.window import WindowSettings, WindowTransformer
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 
@@ -38,6 +38,7 @@ class RenameAxis(BaseTransformer[RenameAxisSettings, AxisArray, AxisArray]):
     Note: If you only require a Unit, then look to `ezmsg.util.messages.modify.ModifyAxis`.
     Unfortunately, that module is not available as a transformer and cannot be included in a CompositeProcessor.
     """
+
     def _process(self, message: AxisArray) -> AxisArray:
         new_dims = list(message.dims)
         new_axes = dict(message.axes)
@@ -66,13 +67,9 @@ class Rate(CompositeProcessor[EventRateSettings, AxisArray, AxisArray]):
                     zero_pad_until="none",
                 )
             ),
-            "aggregate": AggregateTransformer(
-                AggregateSettings(axis="time", operation=AggregationFunction.SUM)
-            ),
+            "aggregate": AggregateTransformer(AggregateSettings(axis="time", operation=AggregationFunction.SUM)),
             "rename": RenameAxis(RenameAxisSettings(old_axis="win", new_axis="time")),
-            "densify_and_scale": DensifyAndScale(
-                DensifyAndScaleSettings(scale=1.0 / settings.bin_duration)
-            ),
+            "densify_and_scale": DensifyAndScale(DensifyAndScaleSettings(scale=1.0 / settings.bin_duration)),
         }
 
 
