@@ -15,17 +15,20 @@ from ezmsg.sigproc.window import WindowSettings, WindowTransformer
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 
-class EventRateSettings(ez.Settings):
-    bin_duration: float = 0.05
-
-
 class DensifyAndScaleSettings(ez.Settings):
     scale: float = 1.0
 
 
 class DensifyAndScale(BaseTransformer[DensifyAndScaleSettings, AxisArray, AxisArray]):
     def _process(self, message: AxisArray) -> AxisArray:
-        return replace(message, data=(message.data.todense() * self.settings.scale))
+        if hasattr(message.data, "todense"):
+            return replace(message, data=(message.data.todense() * self.settings.scale))
+        else:
+            return replace(message, data=(message.data * self.settings.scale))
+
+
+class DensifyAndScaleUnit(BaseTransformerUnit[DensifyAndScaleSettings, AxisArray, AxisArray, DensifyAndScale]):
+    SETTINGS = DensifyAndScaleSettings
 
 
 class RenameAxisSettings(ez.Settings):
@@ -50,6 +53,10 @@ class RenameAxis(BaseTransformer[RenameAxisSettings, AxisArray, AxisArray]):
                 new_axes[self.settings.new_axis] = new_axes.pop(self.settings.old_axis)
 
         return replace(message, dims=new_dims, axes=new_axes)
+
+
+class EventRateSettings(ez.Settings):
+    bin_duration: float = 0.05
 
 
 class Rate(CompositeProcessor[EventRateSettings, AxisArray, AxisArray]):
