@@ -3,7 +3,7 @@ import numba
 import numpy as np
 import numpy.typing as npt
 import sparse
-from ezmsg.sigproc.base import (
+from ezmsg.baseproc import (
     BaseStatefulTransformer,
     BaseTransformerUnit,
     processor_state,
@@ -161,9 +161,7 @@ class EventsFromRatesState:
 
 
 class EventsFromRatesTransformer(
-    BaseStatefulTransformer[
-        EventsFromRatesSettings, AxisArray, AxisArray, EventsFromRatesState
-    ]
+    BaseStatefulTransformer[EventsFromRatesSettings, AxisArray, AxisArray, EventsFromRatesState]
 ):
     def _reset_state(self, message: AxisArray) -> None:
         ch_ax = message.get_axis_idx("ch")
@@ -178,14 +176,10 @@ class EventsFromRatesTransformer(
         total_samples = n_bins * int(bin_duration * self.settings.output_fs)
 
         # Get rates array with shape (n_bins, n_channels), contiguous for numba
-        rates_array = (
-            message.data / bin_duration if self.settings.assume_counts else message.data
-        )
+        rates_array = message.data / bin_duration if self.settings.assume_counts else message.data
         if time_ax != 0:
             rates_array = np.moveaxis(rates_array, time_ax, 0)
-        rates_array = np.ascontiguousarray(
-            np.maximum(rates_array, self.settings.min_rate)
-        )
+        rates_array = np.ascontiguousarray(np.maximum(rates_array, self.settings.min_rate))
         n_channels = rates_array.shape[1]
 
         # Estimate max events per channel based on actual input rates
@@ -194,15 +188,13 @@ class EventsFromRatesTransformer(
         max_events_per_channel = max(int(max_input_rate * total_time * 3) + 10, 20)
 
         # Generate events using numba (parallel across channels)
-        all_event_samples, event_counts, accumulated_out, threshold_out = (
-            _generate_events_all_channels(
-                rates_array,
-                self.state.accumulated,
-                self.state.threshold,
-                bin_duration,
-                self.settings.output_fs,
-                max_events_per_channel,
-            )
+        all_event_samples, event_counts, accumulated_out, threshold_out = _generate_events_all_channels(
+            rates_array,
+            self.state.accumulated,
+            self.state.threshold,
+            bin_duration,
+            self.settings.output_fs,
+            max_events_per_channel,
         )
 
         # Update state for next chunk
@@ -210,9 +202,7 @@ class EventsFromRatesTransformer(
         self.state.threshold = threshold_out
 
         # Flatten per-channel arrays into coordinate arrays
-        event_samples, event_channels = _flatten_events_unsorted(
-            all_event_samples, event_counts
-        )
+        event_samples, event_channels = _flatten_events_unsorted(all_event_samples, event_counts)
 
         # Build sparse array (COO handles sorting internally)
         if len(event_samples) > 0:
@@ -230,9 +220,7 @@ class EventsFromRatesTransformer(
         )
 
         if self.settings.layout == "gcxs":
-            event_array = sparse.GCXS.from_coo(
-                event_array, compressed_axes=self.settings.compress_dims
-            )
+            event_array = sparse.GCXS.from_coo(event_array, compressed_axes=self.settings.compress_dims)
 
         return replace(
             message,
@@ -246,8 +234,6 @@ class EventsFromRatesTransformer(
 
 
 class EventsFromRatesUnit(
-    BaseTransformerUnit[
-        EventsFromRatesSettings, AxisArray, AxisArray, EventsFromRatesTransformer
-    ]
+    BaseTransformerUnit[EventsFromRatesSettings, AxisArray, AxisArray, EventsFromRatesTransformer]
 ):
     SETTINGS = EventsFromRatesSettings
