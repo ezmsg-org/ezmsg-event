@@ -226,7 +226,7 @@ class BinnedKernelActivation(
                 data=np.zeros((0, n_channels), dtype=np.float64),
                 axes={
                     **message.axes,
-                    "time": replace(message.axes["time"], fs=1.0 / self.settings.bin_duration),
+                    "time": replace(message.axes["time"], gain=self.settings.bin_duration),
                 },
             )
 
