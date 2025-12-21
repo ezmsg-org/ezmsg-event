@@ -4,23 +4,17 @@ import cProfile
 import numpy as np
 import sparse
 from ezmsg.util.messages.axisarray import AxisArray
+
 from ezmsg.event.rate import EventRate, EventRateSettings
 
 
 # Simulate input data
 def generate_sparse_data(num_samples, num_channels, sparsity_factor, rng):
-    data = (
-        sparse.random(
-            (num_samples, num_channels), density=sparsity_factor, random_state=rng
-        )
-        > 0
-    )
+    data = sparse.random((num_samples, num_channels), density=sparsity_factor, random_state=rng) > 0
     return data
 
 
-def run_rate_processor(
-    num_samples, num_channels, sparsity_factor, bin_duration, chunk_dur, fs
-):
+def run_rate_processor(num_samples, num_channels, sparsity_factor, bin_duration, chunk_dur, fs):
     rng = np.random.default_rng()
     s = generate_sparse_data(num_samples, num_channels, sparsity_factor, rng)
 
@@ -57,16 +51,15 @@ if __name__ == "__main__":
     FS = 30000.0  # Sampling frequency, as in test_rate.py
 
     print(
-        f"Profiling with: samples={NUM_SAMPLES}, channels={NUM_CHANNELS}, sparsity={SPARSITY_FACTOR}, bin_duration={BIN_DURATION}, chunk_duration={CHUNK_DURATION}, fs={FS}"
+        f"Profiling with: samples={NUM_SAMPLES}, channels={NUM_CHANNELS}, sparsity={SPARSITY_FACTOR},"
+        f"bin_duration={BIN_DURATION}, chunk_duration={CHUNK_DURATION}, fs={FS}"
     )
 
     # Run with cProfile
     profiler = cProfile.Profile()
     profiler.enable()
 
-    run_rate_processor(
-        NUM_SAMPLES, NUM_CHANNELS, SPARSITY_FACTOR, BIN_DURATION, CHUNK_DURATION, FS
-    )
+    run_rate_processor(NUM_SAMPLES, NUM_CHANNELS, SPARSITY_FACTOR, BIN_DURATION, CHUNK_DURATION, FS)
 
     profiler.disable()
 

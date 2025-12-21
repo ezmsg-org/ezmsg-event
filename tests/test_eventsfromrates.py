@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import sparse
-from ezmsg.util.messages.axisarray import AxisArray, LinearAxis, CoordinateAxis
+from ezmsg.util.messages.axisarray import AxisArray, CoordinateAxis, LinearAxis
 
 from ezmsg.event.eventsfromrates import (
     EventsFromRatesSettings,
@@ -128,9 +128,7 @@ class TestEventsFromRatesTransformer:
         for chunk_idx in range(10):
             rates = np.full((n_bins_per_chunk, n_channels), rate)
             time_offset = chunk_idx * n_bins_per_chunk * bin_duration
-            msg = make_rate_message(
-                rates, bin_duration=bin_duration, time_offset=time_offset
-            )
+            msg = make_rate_message(rates, bin_duration=bin_duration, time_offset=time_offset)
 
             result = transformer(msg)
             total_events += result.data.nnz
@@ -307,9 +305,7 @@ class TestEventsFromRatesTransformer:
             dims=["ch", "time"],
             axes={
                 "time": LinearAxis.create_time_axis(fs=fs, offset=0.0),
-                "ch": CoordinateAxis(
-                    data=np.arange(n_channels).astype(str), dims=["ch"]
-                ),
+                "ch": CoordinateAxis(data=np.arange(n_channels).astype(str), dims=["ch"]),
             },
         )
 
