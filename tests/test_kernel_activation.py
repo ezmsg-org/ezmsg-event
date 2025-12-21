@@ -31,7 +31,7 @@ def make_sparse_message(
 
     data = sparse.COO(
         coords=coords_array,
-        data=np.array(values),
+        data=np.array(values, dtype=float),
         shape=shape,
     )
 
