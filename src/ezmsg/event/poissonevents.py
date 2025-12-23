@@ -13,7 +13,7 @@ from ezmsg.util.messages.util import replace
 
 
 @numba.jit(nopython=True, cache=True)
-def _generate_events_single_channel(
+def _inhomogeneous_poisson_generator(
     rates: np.ndarray,  # (n_bins,) rates for this channel
     accumulated: float,  # initial accumulated value
     threshold: float,  # initial threshold
@@ -21,7 +21,8 @@ def _generate_events_single_channel(
     output_fs: float,
     max_events: int,
 ) -> tuple[np.ndarray, int, float, float]:
-    """Generate events for a single channel.
+    """
+    Inhomogeneous Poisson process event generator using the integration method.
 
     Returns:
         event_samples: pre-allocated array of event sample indices
@@ -89,7 +90,7 @@ def _generate_events_all_channels(
     # Process each channel in parallel
     for ch in numba.prange(n_channels):
         rates = rates_array[:, ch]
-        samples, count, acc, thresh = _generate_events_single_channel(
+        samples, count, acc, thresh = _inhomogeneous_poisson_generator(
             rates,
             accumulated[ch],
             threshold[ch],
@@ -131,7 +132,7 @@ def _flatten_events_unsorted(
     return event_samples, event_channels
 
 
-class EventsFromRatesSettings(ez.Settings):
+class PoissonEventSettings(ez.Settings):
     output_fs: float = 30_000
     """Output sampling rate."""
 
@@ -152,7 +153,7 @@ class EventsFromRatesSettings(ez.Settings):
 
 
 @processor_state
-class EventsFromRatesState:
+class PoissonEventState:
     accumulated: npt.NDArray | None = None
     """Integrated rate since last event for each channel."""
 
@@ -160,9 +161,7 @@ class EventsFromRatesState:
     """Exp(1) threshold for next event for each channel."""
 
 
-class EventsFromRatesTransformer(
-    BaseStatefulTransformer[EventsFromRatesSettings, AxisArray, AxisArray, EventsFromRatesState]
-):
+class PoissonEventTransformer(BaseStatefulTransformer[PoissonEventSettings, AxisArray, AxisArray, PoissonEventState]):
     def _reset_state(self, message: AxisArray) -> None:
         ch_ax = message.get_axis_idx("ch")
         n_channels = message.data.shape[ch_ax]
@@ -233,7 +232,5 @@ class EventsFromRatesTransformer(
         )
 
 
-class EventsFromRatesUnit(
-    BaseTransformerUnit[EventsFromRatesSettings, AxisArray, AxisArray, EventsFromRatesTransformer]
-):
-    SETTINGS = EventsFromRatesSettings
+class PoissonEventUnit(BaseTransformerUnit[PoissonEventSettings, AxisArray, AxisArray, PoissonEventTransformer]):
+    SETTINGS = PoissonEventSettings
