@@ -70,6 +70,7 @@ intersphinx_mapping = {
     "python": ("https://docs.python.org/3/", None),
     "numpy": ("https://numpy.org/doc/stable/", None),
     "ezmsg": ("https://www.ezmsg.org/ezmsg/", None),
+    "ezmsg.baseproc": ("https://www.ezmsg.org/ezmsg-baseproc/", None),
     "ezmsg.sigproc": ("https://www.ezmsg.org/ezmsg-sigproc/", None),
 }
 intersphinx_disabled_domains = ["std"]
