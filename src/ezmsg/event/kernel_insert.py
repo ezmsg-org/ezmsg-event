@@ -11,7 +11,7 @@ import numpy.typing as npt
 from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
-from .kernel import ArrayKernel, Kernel, MultiKernel
+from .kernel import Kernel, MultiKernel
 
 
 class SparseKernelInserterSettings(ez.Settings):
@@ -222,40 +222,3 @@ class SparseKernelInserterUnit(
     """Unit for SparseKernelInserter."""
 
     SETTINGS = SparseKernelInserterSettings
-
-
-# =============================================================================
-# Convenience constructors
-# =============================================================================
-
-
-def kernel_inserter(
-    kernel: Kernel | MultiKernel | npt.NDArray | None = None,
-    scale_by_value: bool = False,
-    output_dtype: npt.DTypeLike = np.float64,
-) -> SparseKernelInserter:
-    """
-    Create a SparseKernelInserter with the given kernel.
-
-    Args:
-        kernel: Kernel to insert. Can be:
-            - Kernel object
-            - MultiKernel for value-based selection
-            - numpy array (converted to ArrayKernel)
-            - None for unit impulses
-        scale_by_value: If True, scale kernel by event value.
-        output_dtype: Output array dtype.
-
-    Returns:
-        Configured SparseKernelInserter instance.
-    """
-    if isinstance(kernel, np.ndarray):
-        kernel = ArrayKernel(kernel)
-
-    return SparseKernelInserter(
-        SparseKernelInserterSettings(
-            kernel=kernel,
-            scale_by_value=scale_by_value,
-            output_dtype=output_dtype,
-        )
-    )

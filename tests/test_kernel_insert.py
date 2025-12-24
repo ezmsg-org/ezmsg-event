@@ -8,7 +8,6 @@ from ezmsg.event.kernel import ArrayKernel, MultiKernel
 from ezmsg.event.kernel_insert import (
     SparseKernelInserter,
     SparseKernelInserterSettings,
-    kernel_inserter,
 )
 
 
@@ -49,7 +48,7 @@ class TestSparseKernelInserterBasics:
 
     def test_unit_impulse_no_kernel(self):
         """Without kernel, events become unit impulses."""
-        inserter = kernel_inserter(kernel=None)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings())
 
         message = make_sparse_message(
             coords=[(5, 0), (10, 1)],
@@ -66,7 +65,7 @@ class TestSparseKernelInserterBasics:
 
     def test_scaled_impulse(self):
         """Scale by value option."""
-        inserter = kernel_inserter(kernel=None, scale_by_value=True)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(scale_by_value=True))
 
         message = make_sparse_message(
             coords=[(5, 0), (10, 0)],
@@ -82,7 +81,7 @@ class TestSparseKernelInserterBasics:
     def test_simple_kernel_insertion(self):
         """Insert simple kernel at event location."""
         kernel_data = np.array([1.0, 2.0, 3.0, 2.0, 1.0])
-        inserter = kernel_inserter(kernel=kernel_data)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(kernel=ArrayKernel(kernel_data)))
 
         message = make_sparse_message(
             coords=[(10, 0)],
@@ -100,7 +99,7 @@ class TestSparseKernelInserterBasics:
     def test_overlapping_kernels_sum(self):
         """Overlapping kernels should sum additively."""
         kernel_data = np.array([1.0, 1.0, 1.0])
-        inserter = kernel_inserter(kernel=kernel_data)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(kernel=ArrayKernel(kernel_data)))
 
         # Two events 1 sample apart, kernels will overlap
         message = make_sparse_message(
@@ -120,7 +119,7 @@ class TestSparseKernelInserterBasics:
     def test_multiple_channels(self):
         """Handle events on different channels independently."""
         kernel_data = np.array([1.0, 2.0, 1.0])
-        inserter = kernel_inserter(kernel=kernel_data)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(kernel=ArrayKernel(kernel_data)))
 
         message = make_sparse_message(
             coords=[(5, 0), (5, 1)],
@@ -140,7 +139,7 @@ class TestSparseKernelInserterChunkBoundary:
     def test_kernel_extends_past_chunk(self):
         """Kernel tail carries over to next chunk."""
         kernel_data = np.array([1.0, 2.0, 3.0, 2.0, 1.0])
-        inserter = kernel_inserter(kernel=kernel_data)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(kernel=ArrayKernel(kernel_data)))
 
         # Event near end of chunk - kernel will extend past
         msg1 = make_sparse_message(
@@ -174,7 +173,7 @@ class TestSparseKernelInserterChunkBoundary:
     def test_continuity_across_chunks(self):
         """Verify seamless kernel insertion across multiple chunks."""
         kernel_data = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
-        inserter = kernel_inserter(kernel=kernel_data)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(kernel=ArrayKernel(kernel_data)))
 
         # Event at end of first chunk
         msg1 = make_sparse_message(coords=[(7, 0)], values=[1], shape=(10, 1))
@@ -256,7 +255,7 @@ class TestSparseKernelInserterEmpty:
     def test_empty_events(self):
         """Handle chunks with no events."""
         kernel_data = np.array([1.0, 2.0, 1.0])
-        inserter = kernel_inserter(kernel=kernel_data)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(kernel=ArrayKernel(kernel_data)))
 
         message = make_sparse_message(
             coords=[],
@@ -271,7 +270,7 @@ class TestSparseKernelInserterEmpty:
 
     def test_zero_length_chunk(self):
         """Handle zero-length chunks gracefully."""
-        inserter = kernel_inserter(kernel=None)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings())
 
         message = make_sparse_message(
             coords=[],

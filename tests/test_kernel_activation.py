@@ -10,9 +10,6 @@ from ezmsg.event.kernel_activation import (
     BinAggregation,
     BinnedKernelActivation,
     BinnedKernelActivationSettings,
-    alpha_activation,
-    event_count,
-    exponential_activation,
 )
 
 
@@ -53,7 +50,14 @@ class TestEventCount:
 
     def test_basic_count(self):
         """Count events per bin."""
-        counter = event_count(bin_duration=0.010)  # 10ms bins at 1kHz = 10 samples
+        counter = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=0.010,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+            )
+        )
 
         # 2 events in first bin, 1 in second
         message = make_sparse_message(
@@ -72,7 +76,15 @@ class TestEventCount:
 
     def test_weighted_count(self):
         """Count with event values as weights."""
-        counter = event_count(bin_duration=0.010, scale_by_value=True)
+        counter = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=0.010,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+                scale_by_value=True,
+            )
+        )
 
         message = make_sparse_message(
             coords=[(2, 0), (5, 0)],
@@ -87,7 +99,14 @@ class TestEventCount:
 
     def test_multi_channel_count(self):
         """Count independently per channel."""
-        counter = event_count(bin_duration=0.010)
+        counter = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=0.010,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+            )
+        )
 
         message = make_sparse_message(
             coords=[(2, 0), (3, 1), (5, 0), (7, 1)],
@@ -108,11 +127,14 @@ class TestExponentialActivation:
     def test_single_event_decay(self):
         """Single event should decay exponentially."""
         # tau = 50ms, bins = 10ms, fs = 1000 Hz
-        activation = exponential_activation(
-            tau=0.050,
-            bin_duration=0.010,
-            aggregation=BinAggregation.LAST,
-            normalize=False,  # Easier to verify
+        activation = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.EXPONENTIAL,
+                tau=0.050,
+                bin_duration=0.010,
+                aggregation=BinAggregation.LAST,
+                normalize=False,  # Easier to verify
+            )
         )
 
         # Single event at sample 0
@@ -140,11 +162,14 @@ class TestExponentialActivation:
 
     def test_multiple_events_sum(self):
         """Multiple events should sum in activation."""
-        activation = exponential_activation(
-            tau=0.100,  # 100ms
-            bin_duration=0.050,  # 50ms bins
-            aggregation=BinAggregation.LAST,
-            normalize=False,
+        activation = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.EXPONENTIAL,
+                tau=0.100,  # 100ms
+                bin_duration=0.050,  # 50ms bins
+                aggregation=BinAggregation.LAST,
+                normalize=False,
+            )
         )
 
         # Two events at consecutive samples (sparse.COO dedupes same coords)
@@ -165,9 +190,12 @@ class TestExponentialActivation:
 
     def test_output_rate(self):
         """Output should have correct sample rate."""
-        activation = exponential_activation(
-            tau=0.050,
-            bin_duration=0.020,  # 50 Hz output
+        activation = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.EXPONENTIAL,
+                tau=0.050,
+                bin_duration=0.020,  # 50 Hz output
+            )
         )
 
         message = make_sparse_message(
@@ -192,11 +220,14 @@ class TestAlphaActivation:
 
     def test_alpha_rises_then_decays(self):
         """Alpha kernel should rise then decay."""
-        activation = alpha_activation(
-            tau=0.020,  # 20ms peak time
-            bin_duration=0.010,  # 10ms bins
-            aggregation=BinAggregation.LAST,
-            normalize=False,
+        activation = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.ALPHA,
+                tau=0.020,  # 20ms peak time
+                bin_duration=0.010,  # 10ms bins
+                aggregation=BinAggregation.LAST,
+                normalize=False,
+            )
         )
 
         # Single event at sample 0
@@ -226,7 +257,14 @@ class TestBinAccumulation:
 
     def test_partial_bin_carries_over(self):
         """Partial bins should accumulate across chunks."""
-        counter = event_count(bin_duration=0.015)  # 15ms bins
+        counter = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=0.015,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+            )
+        )
 
         # First chunk: 10ms (not enough for a bin)
         msg1 = make_sparse_message(
@@ -258,10 +296,13 @@ class TestChunkContinuity:
 
     def test_exponential_continuity(self):
         """Exponential activation should be continuous across chunks."""
-        activation = exponential_activation(
-            tau=0.100,  # 100ms
-            bin_duration=0.010,  # 10ms bins
-            normalize=False,
+        activation = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.EXPONENTIAL,
+                tau=0.100,  # 100ms
+                bin_duration=0.010,  # 10ms bins
+                normalize=False,
+            )
         )
 
         # Event in first chunk
@@ -298,7 +339,13 @@ class TestEmptyInput:
 
     def test_empty_events(self):
         """Handle chunks with no events."""
-        activation = exponential_activation(tau=0.050, bin_duration=0.010)
+        activation = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.EXPONENTIAL,
+                tau=0.050,
+                bin_duration=0.010,
+            )
+        )
 
         message = make_sparse_message(
             coords=[],
@@ -314,7 +361,13 @@ class TestEmptyInput:
 
     def test_insufficient_samples_for_bin(self):
         """Handle chunks smaller than one bin."""
-        activation = exponential_activation(tau=0.050, bin_duration=0.020)
+        activation = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.EXPONENTIAL,
+                tau=0.050,
+                bin_duration=0.020,
+            )
+        )
 
         # Only 10 samples at 1kHz = 10ms < 20ms bin
         message = make_sparse_message(
