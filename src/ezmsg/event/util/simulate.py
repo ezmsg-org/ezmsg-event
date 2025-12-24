@@ -32,9 +32,7 @@ def generate_events(
         elif ch_ix in [1, 2]:
             # -- Unfinished events at chunk boundaries --
             # Drop spike samples within 34 samples of the end of the 0th chunk
-            b_drop = np.logical_and(
-                spike_samp_inds >= chunk_len - 34, spike_samp_inds < chunk_len
-            )
+            b_drop = np.logical_and(spike_samp_inds >= chunk_len - 34, spike_samp_inds < chunk_len)
             spike_samp_inds = spike_samp_inds[~b_drop]
             if ch_ix == 1:
                 # In channel 1, we add a spike that is in the very last sample of the 0th chunk.
@@ -75,9 +73,7 @@ def generate_events(
             # -- Spike in first sample of non-first chunk --
             # In channel 4, we add a spike at the very beginning of chunk 1th chunk after making sure 0th was empty.
             spike_samp_inds = spike_samp_inds[spike_samp_inds > chunk_len]
-            spike_samp_inds = np.insert(
-                spike_samp_inds, np.searchsorted(spike_samp_inds, chunk_len), chunk_len
-            )
+            spike_samp_inds = np.insert(spike_samp_inds, np.searchsorted(spike_samp_inds, chunk_len), chunk_len)
         spike_offsets.append(spike_samp_inds)
 
     # Clear all events that occur in 4th - 5th chunks to test flow logic.
@@ -111,7 +107,5 @@ def generate_white_noise_with_events(
     mixed = rng.normal(size=(n_times, n_chans), loc=0, scale=0.1)
     mixed = np.clip(mixed, -np.abs(threshold), np.abs(threshold))
     for ch_ix, ch_spk_offs in enumerate(spike_offsets):
-        mixed[ch_spk_offs, ch_ix] = threshold + np.random.random(
-            size=(len(ch_spk_offs),)
-        )
+        mixed[ch_spk_offs, ch_ix] = threshold + np.random.random(size=(len(ch_spk_offs),))
     return mixed

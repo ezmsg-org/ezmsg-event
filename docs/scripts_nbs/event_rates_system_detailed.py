@@ -1,17 +1,17 @@
 import ezmsg.core as ez
-from ezmsg.util.messages.modify import ModifyAxis
-from ezmsg.sigproc.aggregate import RangedAggregate, AggregationFunction
-from ezmsg.sigproc.math.scale import Scale
+import typer
+from ezmsg.sigproc.aggregate import AggregationFunction, RangedAggregate
 from ezmsg.sigproc.math.log import Log
+from ezmsg.sigproc.math.scale import Scale
 from ezmsg.util.debuglog import DebugLog
 from ezmsg.util.messages.chunker import ArrayChunker
+from ezmsg.util.messages.modify import ModifyAxis
 from ezmsg.util.terminate import TerminateOnTotal
-import typer
 
-from ezmsg.event.util.simulate import generate_white_noise_with_events
-from ezmsg.event.window import Window
 from ezmsg.event.peak import ThresholdCrossing
 from ezmsg.event.sparse import Densify
+from ezmsg.event.util.simulate import generate_white_noise_with_events
+from ezmsg.event.window import Window
 
 
 def main(bin_duration: float = 0.05):
@@ -22,9 +22,7 @@ def main(bin_duration: float = 0.05):
     rate_range = (10, 100)
     chunk_dur = bin_duration / 2
     chunk_len = int(fs * chunk_dur)
-    data = generate_white_noise_with_events(
-        fs, dur, n_chans, rate_range, chunk_dur, threshold
-    )
+    data = generate_white_noise_with_events(fs, dur, n_chans, rate_range, chunk_dur, threshold)
     n_chunks = int(dur / bin_duration)
 
     comps = {
@@ -37,9 +35,7 @@ def main(bin_duration: float = 0.05):
             window_shift=bin_duration,
             zero_pad_until="none",
         ),
-        "AGG": RangedAggregate(
-            axis="time", bands=[(0, bin_duration)], operation=AggregationFunction.SUM
-        ),
+        "AGG": RangedAggregate(axis="time", bands=[(0, bin_duration)], operation=AggregationFunction.SUM),
         "SCALE": Scale(1 / bin_duration),
         "DENSE": Densify(),
         "AXIS": ModifyAxis(name_map={"time": None, "win": "time"}),

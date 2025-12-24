@@ -1,18 +1,18 @@
 import os
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
+import ezmsg.core as ez
 import numpy as np
 import pytest
-import ezmsg.core as ez
 import sparse
 from ezmsg.util.messagecodec import message_log
 from ezmsg.util.messagelogger import MessageLogger
-from ezmsg.util.messages.chunker import array_chunker, ArrayChunker
+from ezmsg.util.messages.chunker import ArrayChunker, array_chunker
 from ezmsg.util.terminate import TerminateOnTotal
 
+from ezmsg.event.peak import ThresholdCrossing, threshold_crossing
 from ezmsg.event.util.simulate import generate_white_noise_with_events
-from ezmsg.event.peak import threshold_crossing, ThresholdCrossing
 
 
 @pytest.mark.parametrize("return_peak_val", [True, False])
@@ -27,9 +27,7 @@ def test_threshold_crossing(return_peak_val: bool):
     refrac_width = int(fs * refrac_dur)
     chunk_len = int(fs * chunk_dur)
 
-    in_dat = generate_white_noise_with_events(
-        fs, dur, n_chans, rate_range, chunk_dur, threshold
-    )
+    in_dat = generate_white_noise_with_events(fs, dur, n_chans, rate_range, chunk_dur, threshold)
 
     bkup_dat = in_dat.copy()
     msg_gen = array_chunker(data=in_dat, chunk_len=chunk_len, axis=0, fs=fs, tzero=0.0)
@@ -113,9 +111,7 @@ def test_system():
     chunk_dur = 0.02
     chunk_len = int(fs * chunk_dur)
 
-    data = generate_white_noise_with_events(
-        fs, dur, n_chans, rate_range, chunk_dur, threshold
-    )
+    data = generate_white_noise_with_events(fs, dur, n_chans, rate_range, chunk_dur, threshold)
     test_filename = get_test_fn()
 
     comps = {

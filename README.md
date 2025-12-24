@@ -2,6 +2,17 @@
 
 ezmsg namespace package for working with signal events like neural spikes and heartbeats
 
+## Overview
+
+``ezmsg-event`` ezmsg namespace package for working with signal events like neural spikes and heartbeats.
+
+Key features:
+
+* **Event detection** - Detect and track signal events in neural data
+* **Spike handling** - Process neural spike events
+* **Heartbeat tracking** - Monitor physiological heartbeat events
+* **Event timestamps** - Precise timing for event occurrences
+
 ## Installation
 
 ```bash
@@ -12,10 +23,12 @@ pip install ezmsg-event
 
 - `ezmsg`
 - `numpy`
+- `ezmsg.baseproc`
+- `ezmsg.sigproc`
 
 ## Usage
 
-See the `examples` folder for usage examples.
+TODO: Add usage examples
 
 ## Development
 

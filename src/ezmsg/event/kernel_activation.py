@@ -66,6 +66,9 @@ class BinnedKernelActivationSettings(ez.Settings):
     normalize: bool = True
     """If True, normalize kernel so integral equals 1."""
 
+    rate_normalize: bool = False
+    """If True, divide output by bin_duration to get events/second (for COUNT kernel)."""
+
 
 @processor_state
 class BinnedKernelActivationState:
@@ -119,8 +122,7 @@ class BinnedKernelActivation(
         n_channels = message.data.shape[message.get_axis_idx("ch")] if "ch" in message.dims else 1
         if "time" not in message.axes or not hasattr(message.axes["time"], "gain"):
             raise ValueError("Could not determine sample rate from input message")
-        fs = 1.0 / message.axes["time"].gain
-        return hash((message.data.ndim, message.data.dtype.kind, n_channels, fs))
+        return hash((message.data.ndim, message.data.dtype.kind, n_channels, message.axes["time"].gain))
 
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
@@ -134,11 +136,10 @@ class BinnedKernelActivation(
         if self.settings.kernel_type == ActivationKernelType.ALPHA:
             self._state.alpha_aux = np.zeros(n_channels, dtype=np.float64)
 
-        # Cache sample rate
-        if "time" in message.axes:
-            time_axis = message.axes["time"]
-            if hasattr(time_axis, "gain") and time_axis.gain > 0:
-                self._state.fs = 1.0 / time_axis.gain
+        # Cache sample rate -- we know time is in axes because _hash_message would raise an error otherwise
+        time_axis = message.axes["time"]
+        if time_axis.gain > 0:
+            self._state.fs = 1.0 / time_axis.gain
 
     def _decay_to_sample(self, channel: int, target_sample: int) -> None:
         """
@@ -232,6 +233,7 @@ class BinnedKernelActivation(
 
         # Calculate bin boundaries (in input samples, relative to chunk start)
         # Account for accumulator from previous chunk
+        accumulator_before = self._state.bin_accumulator  # Save for offset calculation
         first_bin_end = samples_per_bin - self._state.bin_accumulator
         bin_ends = first_bin_end + np.arange(n_bins) * samples_per_bin
 
@@ -324,9 +326,15 @@ class BinnedKernelActivation(
         # Update state sample counters relative to next chunk
         self._state.samples_since_update -= n_samples
 
+        # Apply rate normalization if requested (divide by bin_duration to get events/second)
+        if self.settings.rate_normalize:
+            output = output / self.settings.bin_duration
+
         # Calculate output time offset
+        # The first bin starts at (input_offset - accumulator_time)
         input_offset = message.axes["time"].offset if "time" in message.axes else 0.0
-        output_offset = input_offset + self.settings.bin_duration / 2  # Center of first bin
+        accumulator_time = accumulator_before / self._state.fs
+        output_offset = input_offset - accumulator_time
 
         return replace(
             message,
@@ -451,5 +459,34 @@ def event_count(
             aggregation=BinAggregation.SUM,
             scale_by_value=scale_by_value,
             normalize=False,
+        )
+    )
+
+
+def event_rate(
+    bin_duration: float = 0.020,
+    scale_by_value: bool = False,
+) -> BinnedKernelActivation:
+    """
+    Create event rate calculator (events per second).
+
+    Counts events per bin and divides by bin_duration to get rate in events/second.
+
+    Args:
+        bin_duration: Output bin duration in seconds. Default 20ms.
+        scale_by_value: Weight events by value. Default False.
+
+    Returns:
+        Configured BinnedKernelActivation instance.
+    """
+    return BinnedKernelActivation(
+        BinnedKernelActivationSettings(
+            kernel_type=ActivationKernelType.COUNT,
+            tau=1.0,  # Not used for count
+            bin_duration=bin_duration,
+            aggregation=BinAggregation.SUM,
+            scale_by_value=scale_by_value,
+            normalize=False,
+            rate_normalize=True,
         )
     )

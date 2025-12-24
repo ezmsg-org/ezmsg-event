@@ -1,11 +1,11 @@
 import numpy as np
 import pytest
 import sparse
-from ezmsg.util.messages.axisarray import AxisArray, LinearAxis, CoordinateAxis
+from ezmsg.util.messages.axisarray import AxisArray, CoordinateAxis, LinearAxis
 
-from ezmsg.event.eventsfromrates import (
-    EventsFromRatesSettings,
-    EventsFromRatesTransformer,
+from ezmsg.event.poissonevents import (
+    PoissonEventSettings,
+    PoissonEventTransformer,
 )
 
 
@@ -36,13 +36,13 @@ def make_rate_message(
     )
 
 
-class TestEventsFromRatesTransformer:
+class TestPoissonEventTransformer:
     def test_basic_event_generation(self):
         """Test that events are generated at approximately the expected rate."""
         np.random.seed(42)
 
-        settings = EventsFromRatesSettings(output_fs=30_000)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000)
+        transformer = PoissonEventTransformer(settings)
 
         # 100 Hz rate, 10 bins of 20ms = 200ms total
         # Expected events: 100 * 0.2 = 20 events per channel
@@ -67,8 +67,8 @@ class TestEventsFromRatesTransformer:
 
     def test_output_shape_and_sampling_rate(self):
         """Test that output has correct shape and time axis gain."""
-        settings = EventsFromRatesSettings(output_fs=30_000)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000)
+        transformer = PoissonEventTransformer(settings)
 
         n_bins = 5
         n_channels = 8
@@ -88,8 +88,8 @@ class TestEventsFromRatesTransformer:
         """Test that low rates eventually generate events across multiple chunks."""
         np.random.seed(123)
 
-        settings = EventsFromRatesSettings(output_fs=30_000)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000)
+        transformer = PoissonEventTransformer(settings)
 
         # 10 Hz rate with 20ms bins: expected 0.2 events per bin per channel
         # Over 50 bins (1 second), expect ~10 events per channel
@@ -116,8 +116,8 @@ class TestEventsFromRatesTransformer:
         """Test that state carries over correctly between processing calls."""
         np.random.seed(456)
 
-        settings = EventsFromRatesSettings(output_fs=30_000)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000)
+        transformer = PoissonEventTransformer(settings)
 
         n_channels = 4
         rate = 50.0
@@ -128,9 +128,7 @@ class TestEventsFromRatesTransformer:
         for chunk_idx in range(10):
             rates = np.full((n_bins_per_chunk, n_channels), rate)
             time_offset = chunk_idx * n_bins_per_chunk * bin_duration
-            msg = make_rate_message(
-                rates, bin_duration=bin_duration, time_offset=time_offset
-            )
+            msg = make_rate_message(rates, bin_duration=bin_duration, time_offset=time_offset)
 
             result = transformer(msg)
             total_events += result.data.nnz
@@ -145,8 +143,8 @@ class TestEventsFromRatesTransformer:
         """Test the key scenario: low rate followed by high rate."""
         np.random.seed(789)
 
-        settings = EventsFromRatesSettings(output_fs=30_000)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000)
+        transformer = PoissonEventTransformer(settings)
 
         n_channels = 10
         bin_duration = 0.02
@@ -173,8 +171,8 @@ class TestEventsFromRatesTransformer:
         """Test high rate followed by low rate - accumulated state should persist."""
         np.random.seed(101)
 
-        settings = EventsFromRatesSettings(output_fs=30_000)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000)
+        transformer = PoissonEventTransformer(settings)
 
         n_channels = 8
         bin_duration = 0.02
@@ -203,8 +201,8 @@ class TestEventsFromRatesTransformer:
 
     def test_zero_rate_no_events(self):
         """Test that zero rate produces no events."""
-        settings = EventsFromRatesSettings(output_fs=30_000, min_rate=1e-10)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000, min_rate=1e-10)
+        transformer = PoissonEventTransformer(settings)
 
         n_bins = 10
         n_channels = 4
@@ -223,12 +221,12 @@ class TestEventsFromRatesTransformer:
         """Test that GCXS layout option works correctly."""
         np.random.seed(202)
 
-        settings = EventsFromRatesSettings(
+        settings = PoissonEventSettings(
             output_fs=30_000,
             layout="gcxs",
             compress_dims=[0],
         )
-        transformer = EventsFromRatesTransformer(settings)
+        transformer = PoissonEventTransformer(settings)
 
         rates = np.full((5, 4), 50.0)
         msg = make_rate_message(rates, bin_duration=0.02)
@@ -241,8 +239,8 @@ class TestEventsFromRatesTransformer:
         """Test that assume_counts correctly interprets input as event counts."""
         np.random.seed(303)
 
-        settings = EventsFromRatesSettings(output_fs=30_000, assume_counts=True)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000, assume_counts=True)
+        transformer = PoissonEventTransformer(settings)
 
         n_bins = 10
         n_channels = 4
@@ -264,8 +262,8 @@ class TestEventsFromRatesTransformer:
         """Test that all event times fall within valid sample range."""
         np.random.seed(404)
 
-        settings = EventsFromRatesSettings(output_fs=30_000)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000)
+        transformer = PoissonEventTransformer(settings)
 
         n_bins = 5
         n_channels = 8
@@ -292,8 +290,8 @@ class TestEventsFromRatesTransformer:
         """Test that channel axis in non-standard position is handled correctly."""
         np.random.seed(505)
 
-        settings = EventsFromRatesSettings(output_fs=30_000)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000)
+        transformer = PoissonEventTransformer(settings)
 
         n_bins = 5
         n_channels = 4
@@ -307,9 +305,7 @@ class TestEventsFromRatesTransformer:
             dims=["ch", "time"],
             axes={
                 "time": LinearAxis.create_time_axis(fs=fs, offset=0.0),
-                "ch": CoordinateAxis(
-                    data=np.arange(n_channels).astype(str), dims=["ch"]
-                ),
+                "ch": CoordinateAxis(data=np.arange(n_channels).astype(str), dims=["ch"]),
             },
         )
 
@@ -322,8 +318,8 @@ class TestEventsFromRatesTransformer:
         """Test that event intervals follow expected exponential distribution."""
         np.random.seed(606)
 
-        settings = EventsFromRatesSettings(output_fs=30_000)
-        transformer = EventsFromRatesTransformer(settings)
+        settings = PoissonEventSettings(output_fs=30_000)
+        transformer = PoissonEventTransformer(settings)
 
         # Long duration to get good statistics
         n_bins = 100
