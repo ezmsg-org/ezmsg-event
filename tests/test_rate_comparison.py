@@ -5,7 +5,12 @@ import pytest
 import sparse
 from ezmsg.util.messages.axisarray import AxisArray
 
-from ezmsg.event.kernel_activation import event_rate
+from ezmsg.event.kernel_activation import (
+    ActivationKernelType,
+    BinAggregation,
+    BinnedKernelActivation,
+    BinnedKernelActivationSettings,
+)
 from ezmsg.event.rate import EventRateSettings, Rate
 
 
@@ -54,7 +59,15 @@ class TestRateComparison:
         rate_proc = Rate(EventRateSettings(bin_duration=bin_duration))
 
         # Create event_rate processor
-        event_rate_proc = event_rate(bin_duration=bin_duration)
+        event_rate_proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=bin_duration,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+                rate_normalize=True,
+            )
+        )
 
         # Create test message with events at known positions
         # 3 events in bin 0 (samples 0-9), 2 in bin 1 (10-19), 0 in bin 2, 1 in bin 3
@@ -86,7 +99,15 @@ class TestRateComparison:
         n_samples = 100  # 5 bins
 
         rate_proc = Rate(EventRateSettings(bin_duration=bin_duration))
-        event_rate_proc = event_rate(bin_duration=bin_duration)
+        event_rate_proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=bin_duration,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+                rate_normalize=True,
+            )
+        )
 
         # Events across 3 channels
         message = make_sparse_message(
@@ -121,7 +142,15 @@ class TestRateComparison:
         n_samples = 50
 
         rate_proc = Rate(EventRateSettings(bin_duration=bin_duration))
-        event_rate_proc = event_rate(bin_duration=bin_duration)
+        event_rate_proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=bin_duration,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+                rate_normalize=True,
+            )
+        )
 
         message = make_sparse_message(
             coords=[],
@@ -146,7 +175,15 @@ class TestRateComparison:
         fs = 1000.0
 
         rate_proc = Rate(EventRateSettings(bin_duration=bin_duration))
-        event_rate_proc = event_rate(bin_duration=bin_duration)
+        event_rate_proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=bin_duration,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+                rate_normalize=True,
+            )
+        )
 
         # First chunk: 20 samples (1 full bin + 5 samples overflow)
         msg1 = make_sparse_message(
@@ -195,7 +232,15 @@ class TestRateComparison:
         n_samples = 100
 
         rate_proc = Rate(EventRateSettings(bin_duration=bin_duration))
-        event_rate_proc = event_rate(bin_duration=bin_duration)
+        event_rate_proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=bin_duration,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+                rate_normalize=True,
+            )
+        )
 
         message = make_sparse_message(
             coords=[(10, 0)],
@@ -219,7 +264,15 @@ class TestRateComparison:
         bin_duration = 0.010  # 10ms bins
         fs = 1000.0
 
-        event_rate_proc = event_rate(bin_duration=bin_duration)
+        event_rate_proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                bin_duration=bin_duration,
+                aggregation=BinAggregation.SUM,
+                normalize=False,
+                rate_normalize=True,
+            )
+        )
 
         # 3 events in one 10ms bin = 300 events/second
         message = make_sparse_message(
