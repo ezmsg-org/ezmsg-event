@@ -11,7 +11,7 @@ from ezmsg.util.messagelogger import MessageLogger
 from ezmsg.util.messages.chunker import ArrayChunker, array_chunker
 from ezmsg.util.terminate import TerminateOnTotal
 
-from ezmsg.event.peak import ThresholdCrossing, threshold_crossing
+from ezmsg.event.peak import ThresholdCrossing, ThresholdCrossingTransformer
 from ezmsg.event.util.simulate import generate_white_noise_with_events
 
 
@@ -33,12 +33,12 @@ def test_threshold_crossing(return_peak_val: bool):
     msg_gen = array_chunker(data=in_dat, chunk_len=chunk_len, axis=0, fs=fs, tzero=0.0)
 
     # Extract spikes
-    transform = threshold_crossing(
+    transform = ThresholdCrossingTransformer(
         threshold=threshold,
         refrac_dur=refrac_dur,
         return_peak_val=return_peak_val,
     )
-    msgs_out = [transform.send(_) for _ in msg_gen]
+    msgs_out = [transform(_) for _ in msg_gen]
 
     # Calculated expected spikes -- easy to do all at once without chunk boundaries or performance constraints.
     expected = np.logical_and(bkup_dat[:-1] < threshold, bkup_dat[1:] >= threshold)

@@ -2,8 +2,6 @@
 Detects peaks in a signal.
 """
 
-import typing
-
 import ezmsg.core as ez
 import numpy as np
 import numpy.typing as npt
@@ -14,10 +12,7 @@ from ezmsg.baseproc import (
     processor_state,
 )
 from ezmsg.sigproc.scaler import AdaptiveStandardScalerTransformer
-from ezmsg.util.generator import consumer
 from ezmsg.util.messages.axisarray import AxisArray, replace  # slice_along_axis,
-
-from .message import EventMessage
 
 
 class ThresholdSettings(ez.Settings):
@@ -313,49 +308,3 @@ class ThresholdCrossingTransformer(
 
 class ThresholdCrossing(BaseTransformerUnit[ThresholdSettings, AxisArray, AxisArray, ThresholdCrossingTransformer]):
     SETTINGS = ThresholdSettings
-
-
-# Legacy API support
-@consumer
-def threshold_crossing(
-    threshold: float = -3.5,
-    max_peak_dur: float = 0.002,
-    refrac_dur: float = 0.001,
-    align_on_peak: bool = False,
-    return_peak_val: bool = False,
-    auto_scale_tau: float = 0.0,
-) -> typing.Generator[list[EventMessage] | AxisArray, AxisArray, None]:
-    """
-    Detect threshold crossing events.
-
-    Args:
-        threshold: the value the signal must cross before the peak is found.
-        max_peak_dur: The maximum duration of a peak in seconds.
-        refrac_dur: The minimum duration between peaks in seconds. If 0 (default), no refractory period is enforced.
-        align_on_peak: If False (default), the returned sample index indicates the first sample across threshold.
-              If True, the sample index indicates the sample with the largest deviation after threshold crossing.
-        return_peak_val: If True then the peak value is included in the EventMessage or sparse matrix payload.
-        auto_scale_tau: If > 0, the data will be passed through a standard scaler prior to thresholding.
-
-    Note: If either align_on_peak or return_peak_val are True then it is necessary to find the actual peak and not
-        just the threshold crossing. This will drastically increase the computational demand. It is recommended to
-        tune max_peak_dur to a minimal-yet-reasonable value to limit the search space.
-
-    Returns:
-        A primed generator object that yields a list of :obj:`EventMessage` objects for every
-        :obj:`AxisArray` it receives via `send`.
-    """
-    transformer = ThresholdCrossingTransformer(
-        threshold=threshold,
-        max_peak_dur=max_peak_dur,
-        refrac_dur=refrac_dur,
-        align_on_peak=align_on_peak,
-        return_peak_val=return_peak_val,
-        auto_scale_tau=auto_scale_tau,
-    )
-
-    msg_out = AxisArray(np.array([]), dims=[""])
-
-    while True:
-        msg_in = yield msg_out
-        msg_out = transformer(msg_in)
