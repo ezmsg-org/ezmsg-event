@@ -57,8 +57,12 @@ def test_threshold_crossing(return_peak_val: bool):
     exp_feat_inds = np.array(exp_feat_inds)
     exp_samp_inds = np.array(exp_samp_inds)
 
-    final_arr = sparse.concatenate([_.data for _ in msgs_out], axis=1)
-    feat_inds, samp_inds = final_arr.nonzero()
+    final_arr = sparse.concatenate([_.data for _ in msgs_out], axis=0)
+    samp_inds, feat_inds = final_arr.nonzero()
+    # Sort by feature then time to match the expected ordering (which is built channel-by-channel).
+    sort_order = np.lexsort((samp_inds, feat_inds))
+    samp_inds = samp_inds[sort_order]
+    feat_inds = feat_inds[sort_order]
 
     """
     # This block of code was used to debug some discrepancies that popped up when the last sample of the last chunk
