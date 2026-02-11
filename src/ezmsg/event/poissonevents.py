@@ -174,6 +174,24 @@ class PoissonEventTransformer(BaseStatefulTransformer[PoissonEventSettings, Axis
         bin_duration = message.axes["time"].gain
         total_samples = n_bins * int(bin_duration * self.settings.output_fs)
 
+        if n_bins == 0:
+            ch_ax = message.get_axis_idx("ch")
+            n_channels = message.data.shape[ch_ax]
+            event_array = sparse.COO(
+                coords=np.zeros((2, 0), dtype=np.int64),
+                data=np.zeros(0, dtype=np.int8),
+                shape=(0, n_channels),
+            )
+            return replace(
+                message,
+                data=event_array,
+                dims=["time", "ch"],
+                axes={
+                    **message.axes,
+                    "time": replace(message.axes["time"], gain=1 / self.settings.output_fs),
+                },
+            )
+
         # Get rates array with shape (n_bins, n_channels), contiguous for numba
         rates_array = message.data / bin_duration if self.settings.assume_counts else message.data
         if time_ax != 0:
