@@ -113,12 +113,11 @@ class FunctionalKernel(Kernel):
         causal: If True, kernel is zero for t < 0. Default True.
 
     Example:
-        # Exponential decay kernel with 10ms time constant
-        kernel = FunctionalKernel(
-            func=lambda t, s: (t >= 0) * np.exp(-t / s) / s,
-            sigma=0.010,  # 10ms
-            fs=30000,
-        )
+        >>> kernel = FunctionalKernel(
+        ...     func=lambda t, s: (t >= 0) * np.exp(-t / s) / s,
+        ...     sigma=0.010,  # 10ms
+        ...     fs=30000,
+        ... )
     """
 
     def __init__(
@@ -260,7 +259,7 @@ def gaussian_kernel(t: npt.NDArray, sigma: float) -> npt.NDArray:
 
 def boxcar_kernel(t: npt.NDArray, sigma: float) -> npt.NDArray:
     """
-    Boxcar (rectangular) kernel: k(t) = 1/(2*sigma) for |t| < sigma.
+    Boxcar (rectangular) kernel: k(t) = 1/(2*sigma) for abs(t) < sigma.
 
     Symmetric (acausal). Width is 2*sigma. Normalized so that integral equals 1.
     """

@@ -40,6 +40,7 @@ source_suffix = {
     ".md": "markdown",
 }
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+suppress_warnings = ["myst.xref_missing"]
 
 # The toctree master document
 master_doc = "index"
