@@ -2,7 +2,7 @@
 Detects peaks in a signal.
 
 .. note::
-    This module supports the :doc:`Array API standard </guides/explanations/array_api>`,
+    This module supports the `Array API standard <https://data-apis.org/array-api/>`_,
     enabling use with NumPy, CuPy, PyTorch, and other compatible array libraries.
     Signal data operations are array-API compliant. Event detection and sparse
     output use NumPy regardless of input backend. Output is always sparse.COO.
