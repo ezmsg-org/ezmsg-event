@@ -2,6 +2,7 @@ import time
 
 import numpy as np
 import sparse
+from conftest import CHUNK_LEN, FS, N_CH, make_sparse_event_msg
 from ezmsg.util.messages.axisarray import AxisArray
 
 from ezmsg.event.rate import EventRateSettings, Rate
@@ -57,3 +58,37 @@ def test_event_rate_composite():
     expected = np.sum(s_proc, axis=1) / bin_dur
     assert stack.data.shape == expected.shape
     assert np.allclose(stack.data, expected)
+
+
+def test_rate_empty_time_after_init():
+    """Normal → empty → normal: mid-stream empty message."""
+    proc = Rate(EventRateSettings(bin_duration=0.02))
+
+    msg1 = make_sparse_event_msg(CHUNK_LEN, offset=0.0)
+    msg_empty = make_sparse_event_msg(0, offset=CHUNK_LEN / FS)
+    msg2 = make_sparse_event_msg(CHUNK_LEN, offset=CHUNK_LEN / FS)
+
+    out1 = proc(msg1)
+    assert out1.data.ndim == 2
+
+    out_empty = proc(msg_empty)
+    assert out_empty.data.shape[0] == 0 or out_empty.data.ndim == 2
+
+    out2 = proc(msg2)
+    assert out2.data.ndim == 2
+    assert out2.data.shape[1] == N_CH
+
+
+def test_rate_empty_time_first():
+    """Empty → normal: empty first message triggers _reset_state on empty data."""
+    proc = Rate(EventRateSettings(bin_duration=0.02))
+
+    msg_empty = make_sparse_event_msg(0, offset=0.0)
+    msg_normal = make_sparse_event_msg(CHUNK_LEN, offset=0.0)
+
+    out_empty = proc(msg_empty)
+    assert out_empty.data.ndim == 2
+
+    out_normal = proc(msg_normal)
+    assert out_normal.data.ndim == 2
+    assert out_normal.data.shape[1] == N_CH

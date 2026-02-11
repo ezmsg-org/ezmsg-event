@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import sparse
+from conftest import FS, N_CH, make_rate_msg
 from ezmsg.util.messages.axisarray import AxisArray, CoordinateAxis, LinearAxis
 
 from ezmsg.event.poissonevents import (
@@ -348,3 +349,35 @@ class TestPoissonEventTransformer:
             # Allow 50% tolerance due to finite sample size
             assert actual_mean_isi > expected_mean_isi * 0.5
             assert actual_mean_isi < expected_mean_isi * 2.0
+
+    def test_empty_time_after_init(self):
+        """Normal → empty → normal: mid-stream empty message."""
+        proc = PoissonEventTransformer(PoissonEventSettings(output_fs=FS))
+
+        msg1 = make_rate_msg(5, offset=0.0)  # 5 bins at 50 Hz = 100ms
+        msg_empty = make_rate_msg(0, offset=0.1)
+        msg2 = make_rate_msg(5, offset=0.1)
+
+        out1 = proc(msg1)
+        assert isinstance(out1.data, sparse.SparseArray)
+
+        out_empty = proc(msg_empty)
+        assert isinstance(out_empty.data, sparse.SparseArray)
+
+        out2 = proc(msg2)
+        assert isinstance(out2.data, sparse.SparseArray)
+        assert out2.data.shape[1] == N_CH
+
+    def test_empty_time_first(self):
+        """Empty → normal: empty first message triggers _reset_state on empty data."""
+        proc = PoissonEventTransformer(PoissonEventSettings(output_fs=FS))
+
+        msg_empty = make_rate_msg(0, offset=0.0)
+        msg_normal = make_rate_msg(5, offset=0.0)
+
+        out_empty = proc(msg_empty)
+        assert isinstance(out_empty.data, sparse.SparseArray)
+
+        out_normal = proc(msg_normal)
+        assert isinstance(out_normal.data, sparse.SparseArray)
+        assert out_normal.data.shape[1] == N_CH

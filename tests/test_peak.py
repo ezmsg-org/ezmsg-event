@@ -6,12 +6,13 @@ import ezmsg.core as ez
 import numpy as np
 import pytest
 import sparse
+from conftest import CHUNK_LEN, FS, N_CH, make_dense_msg
 from ezmsg.util.messagecodec import message_log
 from ezmsg.util.messagelogger import MessageLogger
 from ezmsg.util.messages.chunker import ArrayChunker, array_chunker
 from ezmsg.util.terminate import TerminateOnTotal
 
-from ezmsg.event.peak import ThresholdCrossing, ThresholdCrossingTransformer
+from ezmsg.event.peak import ThresholdCrossing, ThresholdCrossingTransformer, ThresholdSettings
 from ezmsg.event.util.simulate import generate_white_noise_with_events
 
 
@@ -138,3 +139,52 @@ def test_system():
         assert isinstance(msg.data, sparse.SparseArray)
         assert msg.axes["time"].gain == 1 / fs
         assert np.round(msg.axes["time"].offset, 3) == np.round(msg_ix * chunk_dur, 3)
+
+
+@pytest.mark.parametrize("return_peak_val", [False, True])
+@pytest.mark.parametrize("auto_scale_tau", [0.0, 0.5])
+def test_threshold_crossing_empty_time_after_init(return_peak_val: bool, auto_scale_tau: float):
+    """Normal → empty → normal: mid-stream empty message should not crash or corrupt state."""
+    proc = ThresholdCrossingTransformer(
+        ThresholdSettings(
+            threshold=-3.5,
+            return_peak_val=return_peak_val,
+            auto_scale_tau=auto_scale_tau,
+        )
+    )
+    msg1 = make_dense_msg(CHUNK_LEN, offset=0.0)
+    msg_empty = make_dense_msg(0, offset=CHUNK_LEN / FS)
+    msg2 = make_dense_msg(CHUNK_LEN, offset=CHUNK_LEN / FS)
+
+    out1 = proc(msg1)
+    assert isinstance(out1.data, sparse.SparseArray)
+
+    out_empty = proc(msg_empty)
+    assert isinstance(out_empty.data, sparse.SparseArray)
+    assert out_empty.data.shape[1] == N_CH
+
+    out2 = proc(msg2)
+    assert isinstance(out2.data, sparse.SparseArray)
+    assert out2.data.shape[1] == N_CH
+
+
+@pytest.mark.parametrize("return_peak_val", [False, True])
+@pytest.mark.parametrize("auto_scale_tau", [0.0, 0.5])
+def test_threshold_crossing_empty_time_first(return_peak_val: bool, auto_scale_tau: float):
+    """Empty → normal: empty first message triggers _reset_state on empty data."""
+    proc = ThresholdCrossingTransformer(
+        ThresholdSettings(
+            threshold=-3.5,
+            return_peak_val=return_peak_val,
+            auto_scale_tau=auto_scale_tau,
+        )
+    )
+    msg_empty = make_dense_msg(0, offset=0.0)
+    msg_normal = make_dense_msg(CHUNK_LEN, offset=0.0)
+
+    out_empty = proc(msg_empty)
+    assert isinstance(out_empty.data, sparse.SparseArray)
+
+    out_normal = proc(msg_normal)
+    assert isinstance(out_normal.data, sparse.SparseArray)
+    assert out_normal.data.shape[1] == N_CH

@@ -1,7 +1,9 @@
 """Unit tests for ezmsg.event.kernel_insert module."""
 
 import numpy as np
+import pytest
 import sparse
+from conftest import CHUNK_LEN, FS, N_CH, make_sparse_event_msg
 from ezmsg.util.messages.axisarray import AxisArray
 
 from ezmsg.event.kernel import ArrayKernel, MultiKernel
@@ -280,3 +282,46 @@ class TestSparseKernelInserterEmpty:
 
         result = inserter(message)
         assert result.data.shape == (0, 2)
+
+
+class TestSparseKernelInserterEmptyTime:
+    """Test handling of length-0 time dimension inputs."""
+
+    @pytest.mark.parametrize("use_kernel", [False, True])
+    def test_empty_time_after_init(self, use_kernel: bool):
+        """Normal → empty → normal: mid-stream empty message."""
+        from ezmsg.event.kernel import FunctionalKernel, exponential_kernel
+
+        kernel = FunctionalKernel(exponential_kernel, sigma=0.001, fs=FS) if use_kernel else None
+        proc = SparseKernelInserter(SparseKernelInserterSettings(kernel=kernel))
+
+        msg1 = make_sparse_event_msg(CHUNK_LEN, offset=0.0)
+        msg_empty = make_sparse_event_msg(0, offset=CHUNK_LEN / FS)
+        msg2 = make_sparse_event_msg(CHUNK_LEN, offset=CHUNK_LEN / FS)
+
+        out1 = proc(msg1)
+        assert out1.data.shape == (CHUNK_LEN, N_CH)
+
+        out_empty = proc(msg_empty)
+        assert out_empty.data.shape[0] == 0
+        assert out_empty.data.shape[1] == N_CH
+
+        out2 = proc(msg2)
+        assert out2.data.shape == (CHUNK_LEN, N_CH)
+
+    @pytest.mark.parametrize("use_kernel", [False, True])
+    def test_empty_time_first(self, use_kernel: bool):
+        """Empty → normal: empty first message triggers _reset_state on empty data."""
+        from ezmsg.event.kernel import FunctionalKernel, exponential_kernel
+
+        kernel = FunctionalKernel(exponential_kernel, sigma=0.001, fs=FS) if use_kernel else None
+        proc = SparseKernelInserter(SparseKernelInserterSettings(kernel=kernel))
+
+        msg_empty = make_sparse_event_msg(0, offset=0.0)
+        msg_normal = make_sparse_event_msg(CHUNK_LEN, offset=0.0)
+
+        out_empty = proc(msg_empty)
+        assert out_empty.data.shape[0] == 0
+
+        out_normal = proc(msg_normal)
+        assert out_normal.data.shape == (CHUNK_LEN, N_CH)

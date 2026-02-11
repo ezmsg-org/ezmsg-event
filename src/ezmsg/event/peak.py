@@ -151,6 +151,24 @@ class ThresholdCrossingTransformer(
         # Take note of how many samples were prepended. We will need this later when we modify `overs`.
         n_prepended = self._state.data.shape[0]
 
+        if data.shape[0] == 0:
+            # No data at all (empty buffer + empty message). Return empty sparse output.
+            result = sparse.COO(
+                np.zeros((data.ndim, 0), dtype=np.int64),
+                data=np.array([], dtype=data.dtype if self.settings.return_peak_val else bool),
+                shape=data.shape,
+            )
+            return replace(message, data=result)
+
+        if n_prepended == 0:
+            # No reference sample from previous iteration (e.g. first message after an empty-data reset).
+            # Duplicate the first sample as the reference, matching the convention that _reset_state
+            # stores data[:1] so it gets prepended on the next call.
+            data = xp.concat((data[:1], data), axis=0)
+            n_prepended = 1
+            if self._state.data_raw is not None:
+                self._state.data_raw = xp.concat((self._state.data_raw[:1], self._state.data_raw), axis=0)
+
         # Identify which data points are over threshold
         overs = data >= self.settings.threshold if self.settings.threshold >= 0 else data <= self.settings.threshold
 
