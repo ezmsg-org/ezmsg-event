@@ -1,9 +1,10 @@
 import numpy as np
 import pytest
 import sparse
+from conftest import CHUNK_LEN, FS, N_CH, make_sparse_event_msg
 from ezmsg.util.messages.axisarray import AxisArray
 
-from ezmsg.event.refractory import RefractoryTransformer
+from ezmsg.event.refractory import RefractorySettings, RefractoryTransformer
 
 
 class TestRefractoryTransformer:
@@ -221,3 +222,36 @@ class TestRefractoryTransformer:
 
         # Both events are far enough apart to pass
         assert result.data.nnz == 2
+
+    def test_empty_time_after_init(self):
+        """Normal → empty → normal: mid-stream empty message."""
+        proc = RefractoryTransformer(RefractorySettings(dur=0.001))
+
+        msg1 = make_sparse_event_msg(CHUNK_LEN, offset=0.0)
+        msg_empty = make_sparse_event_msg(0, offset=CHUNK_LEN / FS)
+        msg2 = make_sparse_event_msg(CHUNK_LEN, offset=CHUNK_LEN / FS)
+
+        out1 = proc(msg1)
+        assert isinstance(out1.data, sparse.SparseArray)
+
+        out_empty = proc(msg_empty)
+        assert isinstance(out_empty.data, sparse.SparseArray)
+        assert out_empty.data.shape[0] == 0
+
+        out2 = proc(msg2)
+        assert isinstance(out2.data, sparse.SparseArray)
+        assert out2.data.shape[1] == N_CH
+
+    def test_empty_time_first(self):
+        """Empty → normal: empty first message triggers _reset_state on empty data."""
+        proc = RefractoryTransformer(RefractorySettings(dur=0.001))
+
+        msg_empty = make_sparse_event_msg(0, offset=0.0)
+        msg_normal = make_sparse_event_msg(CHUNK_LEN, offset=0.0)
+
+        out_empty = proc(msg_empty)
+        assert isinstance(out_empty.data, sparse.SparseArray)
+
+        out_normal = proc(msg_normal)
+        assert isinstance(out_normal.data, sparse.SparseArray)
+        assert out_normal.data.shape[1] == N_CH

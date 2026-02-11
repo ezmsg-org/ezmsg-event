@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 import sparse
+from conftest import CHUNK_LEN, FS, N_CH, make_sparse_event_msg
 from ezmsg.util.messages.axisarray import AxisArray
 
 from ezmsg.event.kernel_activation import (
@@ -406,3 +407,45 @@ class TestAggregationModes:
         result = activation(message)
 
         assert result.data[0, 0] == 3.0  # Sum of all events in bin
+
+
+class TestEmptyTime:
+    """Test handling of length-0 time dimension inputs."""
+
+    @pytest.mark.parametrize(
+        "kernel_type",
+        [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA, ActivationKernelType.COUNT],
+    )
+    def test_empty_time_after_init(self, kernel_type: ActivationKernelType):
+        """Normal → empty → normal: mid-stream empty message."""
+        proc = BinnedKernelActivation(BinnedKernelActivationSettings(kernel_type=kernel_type, bin_duration=0.02))
+        msg1 = make_sparse_event_msg(CHUNK_LEN, offset=0.0)
+        msg_empty = make_sparse_event_msg(0, offset=CHUNK_LEN / FS)
+        msg2 = make_sparse_event_msg(CHUNK_LEN, offset=CHUNK_LEN / FS)
+
+        out1 = proc(msg1)
+        assert out1.data.ndim == 2
+
+        out_empty = proc(msg_empty)
+        assert out_empty.data.shape[0] == 0 or out_empty.data.ndim == 2
+
+        out2 = proc(msg2)
+        assert out2.data.ndim == 2
+        assert out2.data.shape[1] == N_CH
+
+    @pytest.mark.parametrize(
+        "kernel_type",
+        [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA, ActivationKernelType.COUNT],
+    )
+    def test_empty_time_first(self, kernel_type: ActivationKernelType):
+        """Empty → normal: empty first message triggers _reset_state on empty data."""
+        proc = BinnedKernelActivation(BinnedKernelActivationSettings(kernel_type=kernel_type, bin_duration=0.02))
+        msg_empty = make_sparse_event_msg(0, offset=0.0)
+        msg_normal = make_sparse_event_msg(CHUNK_LEN, offset=0.0)
+
+        out_empty = proc(msg_empty)
+        assert out_empty.data.ndim == 2
+
+        out_normal = proc(msg_normal)
+        assert out_normal.data.ndim == 2
+        assert out_normal.data.shape[1] == N_CH
