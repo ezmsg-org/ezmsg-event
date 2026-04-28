@@ -206,11 +206,11 @@ class ThresholdCrossingRateTransformer(
                 over = first >= self.settings.threshold
             else:
                 over = first <= self.settings.threshold
-            self._state.prev_over = over.astype(mx.uint32)
+            self._state.prev_over = over.astype(mx.int8)
 
         self._state.elapsed = mx.asarray(self._state.elapsed, dtype=mx.int32)
         self._state.overflow_counts = mx.asarray(self._state.overflow_counts, dtype=mx.float32)
-        self._state.prev_over = mx.asarray(self._state.prev_over, dtype=mx.uint32)
+        self._state.prev_over = mx.asarray(self._state.prev_over, dtype=mx.int8)
 
         out, self._state.prev_over, self._state.elapsed, self._state.overflow_counts = (
             threshold_crossing_rate_mlx_metal(
