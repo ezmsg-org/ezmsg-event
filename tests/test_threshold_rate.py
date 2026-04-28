@@ -146,6 +146,44 @@ def test_threshold_crossing_rate_matches_sparse_pipeline_for_negative_threshold(
     _assert_messages_match(actual, expected)
 
 
+def test_threshold_crossing_rate_matches_sparse_pipeline_for_fractional_samples_per_bin():
+    fs = 30012.0048
+    threshold = 1.0
+    refrac_dur = 0.0
+    bin_duration = 0.020
+    data = np.zeros((5000, 2), dtype=np.float32)
+    for samp, ch in [
+        (599, 0),
+        (600, 1),
+        (1199, 0),
+        (1200, 1),
+        (2399, 0),
+        (2400, 1),
+        (3000, 0),
+        (3001, 1),
+        (3602, 0),
+    ]:
+        data[samp, ch] = 2.0
+
+    chunks = [data[:777], data[777:1310], data[1310:2450], data[2450:3800], data[3800:]]
+    expected = _run_sparse_reference(
+        chunks,
+        fs=fs,
+        threshold=threshold,
+        refrac_dur=refrac_dur,
+        bin_duration=bin_duration,
+    )
+    actual = _run_dense_fused(
+        chunks,
+        fs=fs,
+        threshold=threshold,
+        refrac_dur=refrac_dur,
+        bin_duration=bin_duration,
+    )
+
+    _assert_messages_match(actual, expected)
+
+
 def test_threshold_crossing_rate_supports_nonzero_time_axis():
     fs = 1000.0
     threshold = 1.0

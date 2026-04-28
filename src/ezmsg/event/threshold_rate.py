@@ -40,11 +40,11 @@ class ThresholdCrossingRateState:
     overflow_counts: Any = None
     """Raw counts in the current partial output bin for each feature."""
 
-    n_overflow: int = 0
-    """Number of input samples in the current partial output bin."""
+    bin_accumulator: float = 0.0
+    """Fractional number of input samples in the current partial output bin."""
 
     refrac_width: int = 0
-    samples_per_bin: int = 0
+    samples_per_bin: float = 0.0
 
 
 class ThresholdCrossingRateTransformer(
@@ -76,8 +76,8 @@ class ThresholdCrossingRateTransformer(
 
         fs = 1.0 / message.axes[self.settings.axis].gain
         self._state.refrac_width = int(self.settings.refrac_dur * fs)
-        self._state.samples_per_bin = int(self.settings.bin_duration * fs)
-        if self._state.samples_per_bin < 1:
+        self._state.samples_per_bin = self.settings.bin_duration * fs
+        if self._state.samples_per_bin < 1.0:
             raise ValueError(
                 f"bin_duration={self.settings.bin_duration} is shorter than one sample at fs={fs:g} Hz"
             )
@@ -89,7 +89,7 @@ class ThresholdCrossingRateTransformer(
             dtype=xp.int32,
         )
         self._state.overflow_counts = xp.zeros(feature_shape, dtype=xp.float32)
-        self._state.n_overflow = 0
+        self._state.bin_accumulator = 0.0
 
     def _process(self, message: AxisArray) -> AxisArray:
         xp = get_namespace(message.data)
@@ -104,10 +104,10 @@ class ThresholdCrossingRateTransformer(
             )
 
         n_samples = message.data.shape[0]
-        n_prev_overflow = self._state.n_overflow
-        n_total = n_prev_overflow + n_samples
-        n_bins = n_total // self._state.samples_per_bin
-        self._state.n_overflow = n_total - n_bins * self._state.samples_per_bin
+        accumulator_before = self._state.bin_accumulator
+        n_total = accumulator_before + n_samples
+        n_bins = int(n_total / self._state.samples_per_bin)
+        self._state.bin_accumulator = n_total - n_bins * self._state.samples_per_bin
 
         if n_samples == 0:
             feature_shape = message.data.shape[1:]
@@ -117,12 +117,12 @@ class ThresholdCrossingRateTransformer(
             and not is_numpy_array(message.data)
             and getattr(xp, "__name__", "") == "mlx.core"
         ):
-            out_data = self._process_mlx(message.data, n_prev_overflow, n_bins)
+            out_data = self._process_mlx(message.data, accumulator_before, n_bins)
         else:
-            out_data = self._process_numpy(message.data, n_prev_overflow, n_bins)
+            out_data = self._process_numpy(message.data, accumulator_before, n_bins)
 
         time_axis = message.axes[self.settings.axis]
-        out_offset = time_axis.offset if n_bins == 0 else time_axis.offset - n_prev_overflow * time_axis.gain
+        out_offset = time_axis.offset if n_bins == 0 else time_axis.offset - accumulator_before * time_axis.gain
         out_axis = replace(
             time_axis,
             gain=self.settings.bin_duration,
@@ -134,12 +134,21 @@ class ThresholdCrossingRateTransformer(
             axes={**message.axes, self.settings.axis: out_axis},
         )
 
-    def _process_numpy(self, data, n_prev_overflow: int, n_bins: int):
+    def _process_numpy(self, data, accumulator_before: float, n_bins: int):
         data_np = data if is_numpy_array(data) else np.asarray(data)
         n_samples = data_np.shape[0]
         feature_shape = data_np.shape[1:]
         n_features = int(np.prod(feature_shape, dtype=np.int64)) if feature_shape else 1
         flat = data_np.reshape(n_samples, n_features)
+        bin_end_samples = (
+            (
+                self._state.samples_per_bin
+                - accumulator_before
+                + np.arange(n_bins, dtype=np.float64) * self._state.samples_per_bin
+            ).astype(np.int64)
+            if n_bins > 0
+            else np.empty((0,), dtype=np.int64)
+        )
 
         prev_over = self._state.prev_over
         if prev_over is None:
@@ -170,7 +179,7 @@ class ThresholdCrossingRateTransformer(
             else:
                 accepted = crossing
             if np.any(accepted):
-                bin_ix = (n_prev_overflow + samp_ix) // self._state.samples_per_bin
+                bin_ix = np.searchsorted(bin_end_samples, samp_ix, side="right")
                 accepted_f32 = accepted.astype(np.float32)
                 if bin_ix < n_bins:
                     out[bin_ix] += accepted_f32
@@ -186,7 +195,7 @@ class ThresholdCrossingRateTransformer(
         self._state.overflow_counts = overflow_flat.reshape(feature_shape)
         return out.reshape((n_bins,) + feature_shape)
 
-    def _process_mlx(self, data, n_prev_overflow: int, n_bins: int):
+    def _process_mlx(self, data, accumulator_before: float, n_bins: int):
         import mlx.core as mx
 
         from ezmsg.event.util.threshold_rate_mlx_metal import threshold_crossing_rate_mlx_metal
@@ -211,7 +220,7 @@ class ThresholdCrossingRateTransformer(
                 self._state.overflow_counts,
                 threshold=self.settings.threshold,
                 refrac_width=self._state.refrac_width,
-                n_overflow=n_prev_overflow,
+                bin_accumulator=accumulator_before,
                 samples_per_bin=self._state.samples_per_bin,
                 n_bins=n_bins,
                 bin_duration=self.settings.bin_duration,
