@@ -11,8 +11,8 @@ def threshold_crossing_rate_mlx_metal(
     *,
     threshold: float,
     refrac_width: int,
-    n_overflow: int,
-    samples_per_bin: int,
+    bin_accumulator: float,
+    samples_per_bin: float,
     n_bins: int,
     bin_duration: float,
     rate_normalize: bool,
@@ -31,9 +31,9 @@ def threshold_crossing_rate_mlx_metal(
         refrac_width: Refractory duration in samples. A crossing is accepted
             only when the distance from the previous accepted crossing is
             greater than this value.
-        n_overflow: Number of input samples already accumulated in the current
-            partial output bin.
-        samples_per_bin: Number of input samples per output bin.
+        bin_accumulator: Fractional number of input samples already accumulated
+            in the current partial output bin.
+        samples_per_bin: Fractional number of input samples per output bin.
         n_bins: Number of complete output bins produced by this chunk.
         bin_duration: Output bin duration in seconds.
         rate_normalize: If true, output events/second; otherwise raw counts.
@@ -45,8 +45,8 @@ def threshold_crossing_rate_mlx_metal(
     """
     if x.ndim < 1:
         raise ValueError(f"x must have at least 1 dimension; got {x.ndim}")
-    if samples_per_bin < 1:
-        raise ValueError(f"samples_per_bin must be >= 1; got {samples_per_bin}")
+    if samples_per_bin < 1.0:
+        raise ValueError(f"samples_per_bin must be >= 1.0; got {samples_per_bin}")
     if n_bins < 0:
         raise ValueError(f"n_bins must be >= 0; got {n_bins}")
 
@@ -62,7 +62,12 @@ def threshold_crossing_rate_mlx_metal(
     elapsed_flat = elapsed.astype(mx.int32).reshape(n_channels)
     overflow_flat = overflow_counts.astype(mx.float32).reshape(n_channels)
     params = mx.array(
-        [float(threshold), float(1.0 / bin_duration if rate_normalize else 1.0)],
+        [
+            float(threshold),
+            float(1.0 / bin_duration if rate_normalize else 1.0),
+            float(samples_per_bin - bin_accumulator),
+            float(samples_per_bin),
+        ],
         dtype=mx.float32,
     )
 
@@ -76,8 +81,6 @@ def threshold_crossing_rate_mlx_metal(
             ("N_CHANNELS", n_channels),
             ("N_BINS", n_bins),
             ("N_OUTPUT_BINS", n_output_bins),
-            ("N_OVERFLOW", n_overflow),
-            ("SAMPLES_PER_BIN", samples_per_bin),
             ("REFRAC_WIDTH", refrac_width),
         ],
         grid=(n_channels, 1, 1),
@@ -120,7 +123,17 @@ _KERNEL_SOURCE = r"""
         overflow = 0.0f;
     }
 
+    uint active_bin = 0;
+    uint active_bin_end = N_BINS > 0 ? uint(params[2]) : 0;
+
     for (uint t = 0; t < N_SAMPLES; ++t) {
+        while (active_bin < N_BINS && t >= active_bin_end) {
+            active_bin += 1;
+            if (active_bin < N_BINS) {
+                active_bin_end = uint(params[2] + float(active_bin) * params[3]);
+            }
+        }
+
         float sample = x_in[t * N_CHANNELS + ch];
         float threshold = params[0];
         uint over = threshold >= 0.0f ? (sample >= threshold) : (sample <= threshold);
@@ -129,10 +142,8 @@ _KERNEL_SOURCE = r"""
 
         elapsed += 1;
         if (crossing && (REFRAC_WIDTH <= 2 || elapsed > REFRAC_WIDTH)) {
-            uint sample_in_bin_stream = N_OVERFLOW + t;
-            uint bin = sample_in_bin_stream / SAMPLES_PER_BIN;
-            if (bin < N_BINS) {
-                rates_out[bin * N_CHANNELS + ch] += 1.0f;
+            if (active_bin < N_BINS) {
+                rates_out[active_bin * N_CHANNELS + ch] += 1.0f;
             } else {
                 overflow += 1.0f;
             }
