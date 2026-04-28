@@ -57,10 +57,21 @@ def threshold_crossing_rate_mlx_metal(
     for dim in batch_shape:
         n_channels *= dim
 
+    if n_samples == 0:
+        rates = mx.zeros((n_bins,) + batch_shape, dtype=mx.float32)
+        return (
+            rates,
+            prev_over.astype(mx.int8).reshape(batch_shape),
+            elapsed.astype(mx.int32).reshape(batch_shape),
+            overflow_counts.astype(mx.float32).reshape(batch_shape),
+        )
+
     x_flat = x_f32.reshape(n_samples, n_channels)
     prev_flat = prev_over.astype(mx.int8).reshape(n_channels)
     elapsed_flat = elapsed.astype(mx.int32).reshape(n_channels)
     overflow_flat = overflow_counts.astype(mx.float32).reshape(n_channels)
+    n_words = (n_samples + 31) // 32
+
     params = mx.array(
         [
             float(threshold),
@@ -71,14 +82,28 @@ def threshold_crossing_rate_mlx_metal(
         dtype=mx.float32,
     )
 
-    # Metal kernels cannot emit a zero-size output on all MLX versions. Use a
-    # one-bin scratch output and slice it away for chunks with no complete bin.
-    n_output_bins = max(n_bins, 1)
-    rates_flat, prev_out, elapsed_out, overflow_out = _kernel(
-        inputs=[x_flat, prev_flat, elapsed_flat, overflow_flat, params],
+    crossing_words, final_over = _crossing_words_kernel(
+        inputs=[x_flat, prev_flat, params],
         template=[
             ("N_SAMPLES", n_samples),
             ("N_CHANNELS", n_channels),
+            ("N_WORDS", n_words),
+        ],
+        grid=(n_words, n_channels, 1),
+        threadgroup=(1, 1, 1),
+        output_shapes=[(n_words, n_channels), (n_channels,)],
+        output_dtypes=[mx.uint32, mx.int8],
+    )
+
+    # Metal kernels cannot emit a zero-size output on all MLX versions. Use a
+    # one-bin scratch output and slice it away for chunks with no complete bin.
+    n_output_bins = max(n_bins, 1)
+    rates_flat, prev_out, elapsed_out, overflow_out = _refractory_words_kernel(
+        inputs=[crossing_words, final_over, elapsed_flat, overflow_flat, params],
+        template=[
+            ("N_SAMPLES", n_samples),
+            ("N_CHANNELS", n_channels),
+            ("N_WORDS", n_words),
             ("N_BINS", n_bins),
             ("N_OUTPUT_BINS", n_output_bins),
             ("REFRAC_WIDTH", refrac_width),
@@ -104,60 +129,127 @@ def threshold_crossing_rate_mlx_metal(
     )
 
 
-_KERNEL_SOURCE = r"""
+_CROSSING_WORDS_KERNEL_SOURCE = r"""
+    uint word = thread_position_in_grid.x;
+    uint ch = thread_position_in_grid.y;
+    if (word >= N_WORDS || ch >= N_CHANNELS) {
+        return;
+    }
+
+    float threshold = params[0];
+    uint start = word * 32;
+    uint prev = 0;
+    if (start == 0) {
+        prev = prev_over_in[ch] != 0;
+    } else {
+        float prev_sample = x_in[(start - 1) * N_CHANNELS + ch];
+        prev = threshold >= 0.0f ? (prev_sample >= threshold) : (prev_sample <= threshold);
+    }
+
+    uint bits = 0;
+    for (uint bit = 0; bit < 32; ++bit) {
+        uint t = start + bit;
+        if (t >= N_SAMPLES) {
+            break;
+        }
+
+        float sample = x_in[t * N_CHANNELS + ch];
+        uint over = threshold >= 0.0f ? (sample >= threshold) : (sample <= threshold);
+        if (over && !prev) {
+            bits |= (1u << bit);
+        }
+        prev = over;
+    }
+    crossing_words_out[word * N_CHANNELS + ch] = bits;
+
+    if (word == N_WORDS - 1) {
+        final_over_out[ch] = prev ? 1 : 0;
+    }
+"""
+
+
+_REFRACTORY_WORDS_KERNEL_SOURCE = r"""
     uint ch = thread_position_in_grid.x;
     if (ch >= N_CHANNELS) {
         return;
     }
 
-    uint prev = prev_over_in[ch] != 0;
-    int elapsed = elapsed_in[ch];
+    float scale = params[1];
+    float first_bin_end = params[2];
+    float samples_per_bin = params[3];
 
+    float overflow = overflow_counts_in[ch];
     for (uint bin = 0; bin < N_OUTPUT_BINS; ++bin) {
         rates_out[bin * N_CHANNELS + ch] = 0.0f;
     }
-
-    float overflow = overflow_counts_in[ch];
     if (N_BINS > 0) {
         rates_out[ch] = overflow;
         overflow = 0.0f;
     }
 
-    float threshold = params[0];
-    float first_bin_end = params[2];
-    float samples_per_bin = params[3];
+    int elapsed = elapsed_in[ch];
+    int last_t = -1;
 
-    for (uint t = 0; t < N_SAMPLES; ++t) {
-        float sample = x_in[t * N_CHANNELS + ch];
-        uint over = threshold >= 0.0f ? (sample >= threshold) : (sample <= threshold);
-        uint crossing = over && !prev;
-        prev = over;
-
-        elapsed += 1;
-        if (crossing && (REFRAC_WIDTH <= 2 || elapsed > REFRAC_WIDTH)) {
-            int active_bin = int(ceil((float(t) + 1.0f - first_bin_end) / samples_per_bin));
-            if (active_bin >= 0 && active_bin < N_BINS) {
-                rates_out[uint(active_bin) * N_CHANNELS + ch] += 1.0f;
-            } else {
-                overflow += 1.0f;
+    for (uint word = 0; word < N_WORDS; ++word) {
+        uint bits = crossing_words_in[word * N_CHANNELS + ch];
+        while (bits != 0) {
+            uint bit = 0;
+            uint mask = 1u;
+            while ((bits & mask) == 0u) {
+                bit += 1;
+                mask <<= 1;
             }
-            elapsed = 0;
+            bits &= ~mask;
+
+            uint t = word * 32 + bit;
+            if (t >= N_SAMPLES) {
+                break;
+            }
+
+            elapsed += int(t) - last_t;
+            last_t = int(t);
+
+            if (REFRAC_WIDTH <= 2 || elapsed > REFRAC_WIDTH) {
+                int active_bin = int(ceil((float(t) + 1.0f - first_bin_end) / samples_per_bin));
+                if (active_bin >= 0 && active_bin < N_BINS) {
+                    rates_out[uint(active_bin) * N_CHANNELS + ch] += 1.0f;
+                } else {
+                    overflow += 1.0f;
+                }
+                elapsed = 0;
+            }
         }
     }
 
+    elapsed += int(N_SAMPLES) - 1 - last_t;
+
     for (uint bin = 0; bin < N_BINS; ++bin) {
-        rates_out[bin * N_CHANNELS + ch] *= params[1];
+        rates_out[bin * N_CHANNELS + ch] *= scale;
     }
 
-    prev_over_out[ch] = prev ? 1 : 0;
+    prev_over_out[ch] = final_over_in[ch];
     elapsed_out[ch] = elapsed;
     overflow_counts_out[ch] = overflow;
 """
 
 
-_kernel = mx.fast.metal_kernel(
-    name="threshold_crossing_rate",
-    input_names=["x_in", "prev_over_in", "elapsed_in", "overflow_counts_in", "params"],
+_crossing_words_kernel = mx.fast.metal_kernel(
+    name="threshold_crossing_words",
+    input_names=["x_in", "prev_over_in", "params"],
+    output_names=["crossing_words_out", "final_over_out"],
+    source=_CROSSING_WORDS_KERNEL_SOURCE,
+)
+
+
+_refractory_words_kernel = mx.fast.metal_kernel(
+    name="threshold_refractory_words",
+    input_names=[
+        "crossing_words_in",
+        "final_over_in",
+        "elapsed_in",
+        "overflow_counts_in",
+        "params",
+    ],
     output_names=["rates_out", "prev_over_out", "elapsed_out", "overflow_counts_out"],
-    source=_KERNEL_SOURCE,
+    source=_REFRACTORY_WORDS_KERNEL_SOURCE,
 )
