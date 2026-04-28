@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from ezmsg.util.messages.axisarray import AxisArray
 
 from ezmsg.event.peak import ThresholdCrossingTransformer
@@ -65,6 +66,16 @@ def _run_dense_fused(
         out.append(proc(msg))
         samp_offset += chunk.shape[dims.index("time") if dims else 0]
     return out
+
+
+def _require_mlx_metal():
+    mx = pytest.importorskip("mlx.core")
+    try:
+        probe = mx.array([1.0], dtype=mx.float32)
+        mx.eval(probe)
+    except RuntimeError as exc:
+        pytest.skip(f"MLX Metal device unavailable: {exc}")
+    return mx
 
 
 def _assert_messages_match(actual: list[AxisArray], expected: list[AxisArray]) -> None:
@@ -242,3 +253,105 @@ def test_threshold_crossing_rate_empty_time_first_and_midstream():
 
     mid_empty = proc(_make_msg(np.zeros((0, 2), dtype=np.float32), fs, 0.020))
     assert mid_empty.data.shape == (0, 2)
+
+
+def test_threshold_crossing_rate_mlx_metal_matches_cpu_for_adversarial_refractory():
+    mx = _require_mlx_metal()
+    fs = 1000.0
+    threshold = 1.0
+    refrac_dur = 0.030
+    bin_duration = 0.100
+    data = np.zeros((1000, 4), dtype=np.float32)
+
+    for ch in range(data.shape[1]):
+        for samp in range(ch + 1, data.shape[0], 31):
+            data[samp, ch] = 2.0
+
+    chunks = [data[:137], data[137:503], data[503:777], data[777:]]
+    expected = _run_dense_fused(
+        chunks,
+        fs=fs,
+        threshold=threshold,
+        refrac_dur=refrac_dur,
+        bin_duration=bin_duration,
+    )
+
+    proc = ThresholdCrossingRateTransformer(
+        ThresholdCrossingRateSettings(
+            threshold=threshold,
+            refrac_dur=refrac_dur,
+            bin_duration=bin_duration,
+            use_mlx_metal=True,
+        )
+    )
+    actual = []
+    samp_offset = 0
+    for chunk in chunks:
+        msg = _make_msg(mx.array(chunk), fs, samp_offset / fs)
+        out = proc(msg)
+        mx.eval(
+            out.data,
+            proc._state.prev_over,
+            proc._state.elapsed,
+            proc._state.overflow_counts,
+        )
+        actual.append(out)
+        samp_offset += chunk.shape[0]
+
+    _assert_messages_match(actual, expected)
+
+
+def test_threshold_crossing_rate_mlx_metal_matches_cpu_for_negative_fractional_bins():
+    mx = _require_mlx_metal()
+    fs = 30012.0048
+    threshold = -1.0
+    refrac_dur = 0.001
+    bin_duration = 0.020
+    data = np.zeros((5000, 3), dtype=np.float32)
+    for samp, ch in [
+        (599, 0),
+        (600, 1),
+        (631, 1),
+        (1199, 0),
+        (1200, 2),
+        (1230, 2),
+        (2399, 0),
+        (2400, 1),
+        (3000, 0),
+        (3001, 2),
+        (3602, 1),
+    ]:
+        data[samp, ch] = -2.0
+
+    chunks = [data[:777], data[777:1310], data[1310:2450], data[2450:3800], data[3800:]]
+    expected = _run_dense_fused(
+        chunks,
+        fs=fs,
+        threshold=threshold,
+        refrac_dur=refrac_dur,
+        bin_duration=bin_duration,
+    )
+
+    proc = ThresholdCrossingRateTransformer(
+        ThresholdCrossingRateSettings(
+            threshold=threshold,
+            refrac_dur=refrac_dur,
+            bin_duration=bin_duration,
+            use_mlx_metal=True,
+        )
+    )
+    actual = []
+    samp_offset = 0
+    for chunk in chunks:
+        msg = _make_msg(mx.array(chunk), fs, samp_offset / fs)
+        out = proc(msg)
+        mx.eval(
+            out.data,
+            proc._state.prev_over,
+            proc._state.elapsed,
+            proc._state.overflow_counts,
+        )
+        actual.append(out)
+        samp_offset += chunk.shape[0]
+
+    _assert_messages_match(actual, expected)
