@@ -21,7 +21,7 @@ def threshold_crossing_rate_mlx_metal(
 
     Args:
         x: MLX array with shape ``(n_samples, *features)``.
-        prev_over: UInt32 MLX array with shape ``(*features,)``; nonzero
+        prev_over: Int8 MLX array with shape ``(*features,)``; nonzero
             indicates whether the sample before this chunk was over threshold.
         elapsed: Int32 MLX array with shape ``(*features,)`` tracking samples
             since the last accepted crossing.
@@ -58,7 +58,7 @@ def threshold_crossing_rate_mlx_metal(
         n_channels *= dim
 
     x_flat = x_f32.reshape(n_samples, n_channels)
-    prev_flat = prev_over.astype(mx.uint32).reshape(n_channels)
+    prev_flat = prev_over.astype(mx.int8).reshape(n_channels)
     elapsed_flat = elapsed.astype(mx.int32).reshape(n_channels)
     overflow_flat = overflow_counts.astype(mx.float32).reshape(n_channels)
     params = mx.array(
@@ -91,7 +91,7 @@ def threshold_crossing_rate_mlx_metal(
             (n_channels,),
             (n_channels,),
         ],
-        output_dtypes=[mx.float32, mx.uint32, mx.int32, mx.float32],
+        output_dtypes=[mx.float32, mx.int8, mx.int32, mx.float32],
     )
 
     rates_flat = rates_flat[:n_bins]
@@ -110,7 +110,7 @@ _KERNEL_SOURCE = r"""
         return;
     }
 
-    uint prev = prev_over_in[ch];
+    uint prev = prev_over_in[ch] != 0;
     int elapsed = elapsed_in[ch];
 
     for (uint bin = 0; bin < N_OUTPUT_BINS; ++bin) {
@@ -123,27 +123,21 @@ _KERNEL_SOURCE = r"""
         overflow = 0.0f;
     }
 
-    uint active_bin = 0;
-    uint active_bin_end = N_BINS > 0 ? uint(params[2]) : 0;
+    float threshold = params[0];
+    float first_bin_end = params[2];
+    float samples_per_bin = params[3];
 
     for (uint t = 0; t < N_SAMPLES; ++t) {
-        while (active_bin < N_BINS && t >= active_bin_end) {
-            active_bin += 1;
-            if (active_bin < N_BINS) {
-                active_bin_end = uint(params[2] + float(active_bin) * params[3]);
-            }
-        }
-
         float sample = x_in[t * N_CHANNELS + ch];
-        float threshold = params[0];
         uint over = threshold >= 0.0f ? (sample >= threshold) : (sample <= threshold);
         uint crossing = over && !prev;
         prev = over;
 
         elapsed += 1;
         if (crossing && (REFRAC_WIDTH <= 2 || elapsed > REFRAC_WIDTH)) {
-            if (active_bin < N_BINS) {
-                rates_out[active_bin * N_CHANNELS + ch] += 1.0f;
+            int active_bin = int(ceil((float(t) + 1.0f - first_bin_end) / samples_per_bin));
+            if (active_bin >= 0 && active_bin < N_BINS) {
+                rates_out[uint(active_bin) * N_CHANNELS + ch] += 1.0f;
             } else {
                 overflow += 1.0f;
             }
@@ -155,7 +149,7 @@ _KERNEL_SOURCE = r"""
         rates_out[bin * N_CHANNELS + ch] *= params[1];
     }
 
-    prev_over_out[ch] = prev;
+    prev_over_out[ch] = prev ? 1 : 0;
     elapsed_out[ch] = elapsed;
     overflow_counts_out[ch] = overflow;
 """
