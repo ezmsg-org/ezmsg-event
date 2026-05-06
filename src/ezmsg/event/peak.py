@@ -169,11 +169,12 @@ class ThresholdCrossingTransformer(
             return False
         return getattr(xp, "__name__", "") == "mlx.core"
 
-    def _process_mlx_metal(self, message: AxisArray) -> AxisArray:
+    def _process_mlx_metal(self, message: AxisArray):
         """Run the on-device Metal kernel for threshold detection + refractory.
 
         Caller (``_process``) has already short-circuited empty messages, so this
-        always operates on at least one sample.
+        always operates on at least one sample. Returns ``(events, t0_offset_samples)``
+        with ``t0_offset_samples == 0`` since the kernel processes the chunk in place.
         """
         from ezmsg.event.util.peak_mlx_metal import threshold_crossings_mlx_metal
 
@@ -190,7 +191,23 @@ class ThresholdCrossingTransformer(
         )
         self._state.data = last_sample[None, ...]
         self._state.elapsed = elapsed_out
-        return replace(message, data=events)
+        return events, 0
+
+    def _wrap_output(self, message: AxisArray, data, t0_offset_samples: int = 0) -> AxisArray:
+        """Build the output AxisArray, shifting the time offset if the result begins
+        earlier than the input chunk (the cpu path can hold back unfinished events
+        from the previous chunk into this output)."""
+        if t0_offset_samples == 0:
+            return replace(message, data=data)
+        time_axis = message.axes["time"]
+        return replace(
+            message,
+            data=data,
+            axes={
+                **message.axes,
+                "time": replace(time_axis, offset=time_axis.offset + t0_offset_samples * time_axis.gain),
+            },
+        )
 
     def _empty_output(self, message: AxisArray, xp) -> AxisArray:
         """Build an empty output AxisArray that matches the active path's container/dtype."""
@@ -241,7 +258,8 @@ class ThresholdCrossingTransformer(
         # MLX-on-device fast path: bypass the numpy event-detection logic and run
         # the fused metal kernel for threshold detection + refractory enforcement.
         if self._can_use_mlx_metal(xp, message.data):
-            return self._process_mlx_metal(message)
+            data, t0_off = self._process_mlx_metal(message)
+            return self._wrap_output(message, data, t0_off)
 
         # Take a copy of the raw data if needed and prepend to our state data_raw
         #  This will only exist if we are autoscaling AND we need to capture the true peak value.
@@ -323,7 +341,7 @@ class ThresholdCrossingTransformer(
         # Calculate the 'value' at each event.
         hold_idx = overs_np.shape[0] - 1
         if len(cross_idx[0]) == 0:
-            # No events; not values to calculate.
+            # No events; no values to calculate.
             result_val = np.ones(
                 cross_idx[0].shape,
                 dtype=data.dtype if self.settings.return_peak_val else bool,
@@ -332,93 +350,7 @@ class ThresholdCrossingTransformer(
             # No postprocessing required. TODO: Why is min_width <= 1 a requirement here?
             result_val = np.ones(cross_idx[0].shape, dtype=bool)
         else:
-            # Do postprocessing of events: width-checking, align-on-peak, and/or include peak value in return.
-            # Each of these requires finding the true peak, which requires pulling out a snippet around the
-            #  threshold crossing event.
-            # We extract max_width-length vectors of `overs` values for each event. This might require some padding
-            #  if the event is near the end of the data. Pad with the last sample until the expected end of the event.
-            n_pad = max(0, max(cross_idx[0]) + self._state.max_width - overs_np.shape[0])
-            pad_width = ((0, n_pad),) + ((0, 0),) * (overs_np.ndim - 1)
-            overs_padded = np.pad(overs_np, pad_width, mode="edge")
-
-            # Extract the segments for each event.
-            # First we get the sample indices. This is 2-dimensional; first dim for offset and remaining for seg length.
-            s_idx = np.arange(self._state.max_width)[None, :] + cross_idx[0][:, None]
-            # Combine feature indices and time indices to extract segments of overs.
-            #  Note: We had to expand each of our feature indices also be 2-dimensional
-            # -> ndarray (eat dims ..., max_width)
-            ep_overs = overs_padded[(s_idx,) + tuple(_[:, None] for _ in cross_idx[1:])]
-
-            # Find the event lengths: i.e., the first non-over-threshold value for each event.
-            # Warning: Values are invalid for events that don't cross back.
-            ev_len = ep_overs[..., 1:].argmin(axis=-1)
-            ev_len += 1  # Adjust because we skipped first sample
-
-            # Identify peaks that successfully cross back
-            b_ev_crossback = np.any(~ep_overs[..., 1:], axis=-1)
-
-            if self._state.min_width > 1:
-                # Drop events that have crossed back but fail min_width
-                b_long = ~np.logical_and(b_ev_crossback, ev_len < self._state.min_width)
-                cross_idx = tuple(_[b_long] for _ in cross_idx)
-                ev_len = ev_len[b_long]
-                b_ev_crossback = b_ev_crossback[b_long]
-
-            # We are returning a sparse array and unfinished peaks must be buffered for the next iteration.
-            # Find the earliest unfinished event. If none, we still buffer the final sample.
-            b_unf = ~b_ev_crossback
-            hold_idx = cross_idx[0][b_unf].min() if np.any(b_unf) else hold_idx
-
-            # Trim events that are past the hold_idx. They will be processed next iteration.
-            b_pass_ev = cross_idx[0] < hold_idx
-            cross_idx = [_[b_pass_ev] for _ in cross_idx]
-            ev_len = ev_len[b_pass_ev]
-
-            if np.any(b_unf):
-                # Must hold back at least 1 sample before start of unfinished events so we can re-detect.
-                hold_idx = max(hold_idx - 1, 0)
-
-            # If we are not returning peak values, we can just return bools at the event locations.
-            result_val = np.ones(cross_idx[0].shape, dtype=bool)
-
-            # For remaining _finished_ peaks, get the peak location -- for alignment or if returning its value.
-            if self.settings.align_on_peak or self.settings.return_peak_val:
-                # Convert data to numpy for advanced integer indexing into sparse.COO output.
-                data_np = np.asarray(data) if not is_numpy_array(data) else data
-                raw_source_np = data_np
-                if self._state.data_raw is not None:
-                    raw_source_np = (
-                        np.asarray(self._state.data_raw)
-                        if not is_numpy_array(self._state.data_raw)
-                        else self._state.data_raw
-                    )
-                # We process peaks in batches based on their length, otherwise short peaks could give
-                #  incorrect argmax results.
-                # TODO: Check performance of using a masked array instead. Might take longer to create the mask.
-                pk_offset = np.zeros_like(ev_len)
-                uq_lens, len_grps = np.unique(ev_len, return_inverse=True)
-                for len_idx, ep_len in enumerate(uq_lens):
-                    b_grp = len_grps == len_idx
-                    ep_resamp = np.arange(ep_len)[None, :] + cross_idx[0][b_grp, None]
-                    ep_inds_tuple = (ep_resamp,) + tuple(_[b_grp, None] for _ in cross_idx[1:])
-                    eps = data_np[ep_inds_tuple]
-                    if self.settings.threshold >= 0:
-                        pk_offset[b_grp] = np.argmax(eps, axis=1)
-                    else:
-                        pk_offset[b_grp] = np.argmin(eps, axis=1)
-
-                if self.settings.align_on_peak:
-                    # We want to align on the peak, so add the peak offset.
-                    cross_idx[0] += pk_offset
-
-                if self.settings.return_peak_val:
-                    # We need the actual peak value.
-                    peak_inds_tuple = (
-                        tuple(cross_idx)
-                        if self.settings.align_on_peak
-                        else (cross_idx[0] + pk_offset,) + tuple(cross_idx[1:])
-                    )
-                    result_val = raw_source_np[peak_inds_tuple]
+            cross_idx, result_val, hold_idx = self._postprocess_peaks(cross_idx, hold_idx, overs_np, data)
 
         # Save data for next iteration
         self._state.data = data[hold_idx:]
@@ -431,13 +363,12 @@ class ThresholdCrossingTransformer(
         self._state.elapsed[tuple(cross_idx[1:])] = hold_idx - cross_idx[0]
         #  Note: multiple-write to same index ^ is fine because it is sorted and the last value for each is correct.
 
-        # Prepare output.
+        # Build the result data; the AxisArray wrapping (with the time-offset shift for held-back samples)
+        # is handled by the shared _wrap_output below.
         # Note: The first of the held back samples for next iteration is part of this iteration's return.
         #  Likewise, the first prepended sample on this iteration was part of the previous iteration's return.
-        n_out_samps = hold_idx
-        t0 = message.axes["time"].offset - (n_prepended - 1) * message.axes["time"].gain
         cross_idx[0] -= 1  # Discard first prepended sample.
-        out_shape = (n_out_samps,) + data.shape[1:]
+        out_shape = (hold_idx,) + data.shape[1:]
         if self.settings.output_format == OutputFormat.SPARSE:
             result = sparse.COO(cross_idx, data=result_val, shape=out_shape)
         else:
@@ -447,15 +378,90 @@ class ThresholdCrossingTransformer(
             if cross_idx[0].size > 0:
                 dense_np[tuple(cross_idx)] = result_val
             result = dense_np if xp is np else xp.asarray(dense_np)
-        msg_out = replace(
-            message,
-            data=result,
-            axes={
-                **message.axes,
-                "time": replace(message.axes["time"], offset=t0),
-            },
-        )
-        return msg_out
+        return self._wrap_output(message, result, t0_offset_samples=-(n_prepended - 1))
+
+    def _postprocess_peaks(self, cross_idx, hold_idx, overs_np, data):
+        """Apply min_peak_dur / align_on_peak / return_peak_val to detected crossings.
+
+        Walks each event's ``max_width``-long over/under window to find the true peak,
+        drops events that fail ``min_peak_dur``, and (for ``align_on_peak``) shifts
+        the event sample index to the peak location. May reduce ``hold_idx`` so
+        unfinished events get buffered for the next chunk.
+
+        Returns:
+            ``(cross_idx, result_val, hold_idx)``.
+        """
+        # Extract max_width-length vectors of `overs` values for each event. Pad with the last sample
+        # until the expected end of the event so events near the end of the data still resolve.
+        n_pad = max(0, max(cross_idx[0]) + self._state.max_width - overs_np.shape[0])
+        pad_width = ((0, n_pad),) + ((0, 0),) * (overs_np.ndim - 1)
+        overs_padded = np.pad(overs_np, pad_width, mode="edge")
+
+        s_idx = np.arange(self._state.max_width)[None, :] + cross_idx[0][:, None]
+        ep_overs = overs_padded[(s_idx,) + tuple(_[:, None] for _ in cross_idx[1:])]
+
+        # Event length = first non-over sample (invalid for events that don't cross back).
+        ev_len = ep_overs[..., 1:].argmin(axis=-1)
+        ev_len += 1  # Adjust because we skipped the first sample.
+        b_ev_crossback = np.any(~ep_overs[..., 1:], axis=-1)
+
+        if self._state.min_width > 1:
+            # Drop events that crossed back but fail min_width.
+            b_long = ~np.logical_and(b_ev_crossback, ev_len < self._state.min_width)
+            cross_idx = tuple(_[b_long] for _ in cross_idx)
+            ev_len = ev_len[b_long]
+            b_ev_crossback = b_ev_crossback[b_long]
+
+        # Find the earliest unfinished event so we can buffer it for the next chunk.
+        b_unf = ~b_ev_crossback
+        hold_idx = cross_idx[0][b_unf].min() if np.any(b_unf) else hold_idx
+
+        # Trim events that are past the hold_idx; they'll re-emerge next chunk.
+        b_pass_ev = cross_idx[0] < hold_idx
+        cross_idx = [_[b_pass_ev] for _ in cross_idx]
+        ev_len = ev_len[b_pass_ev]
+
+        if np.any(b_unf):
+            # Hold back at least 1 sample before start of unfinished events so we can re-detect.
+            hold_idx = max(hold_idx - 1, 0)
+
+        result_val = np.ones(cross_idx[0].shape, dtype=bool)
+
+        if self.settings.align_on_peak or self.settings.return_peak_val:
+            data_np = np.asarray(data) if not is_numpy_array(data) else data
+            raw_source_np = data_np
+            if self._state.data_raw is not None:
+                raw_source_np = (
+                    np.asarray(self._state.data_raw)
+                    if not is_numpy_array(self._state.data_raw)
+                    else self._state.data_raw
+                )
+            # Process peaks in batches by length so short peaks don't give incorrect argmax results.
+            # TODO: Check performance of using a masked array instead. Might take longer to create the mask.
+            pk_offset = np.zeros_like(ev_len)
+            uq_lens, len_grps = np.unique(ev_len, return_inverse=True)
+            for len_idx, ep_len in enumerate(uq_lens):
+                b_grp = len_grps == len_idx
+                ep_resamp = np.arange(ep_len)[None, :] + cross_idx[0][b_grp, None]
+                ep_inds_tuple = (ep_resamp,) + tuple(_[b_grp, None] for _ in cross_idx[1:])
+                eps = data_np[ep_inds_tuple]
+                if self.settings.threshold >= 0:
+                    pk_offset[b_grp] = np.argmax(eps, axis=1)
+                else:
+                    pk_offset[b_grp] = np.argmin(eps, axis=1)
+
+            if self.settings.align_on_peak:
+                cross_idx[0] += pk_offset
+
+            if self.settings.return_peak_val:
+                peak_inds_tuple = (
+                    tuple(cross_idx)
+                    if self.settings.align_on_peak
+                    else (cross_idx[0] + pk_offset,) + tuple(cross_idx[1:])
+                )
+                result_val = raw_source_np[peak_inds_tuple]
+
+        return cross_idx, result_val, hold_idx
 
 
 class ThresholdCrossing(BaseTransformerUnit[ThresholdSettings, AxisArray, AxisArray, ThresholdCrossingTransformer]):
