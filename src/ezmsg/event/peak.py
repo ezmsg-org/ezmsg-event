@@ -170,25 +170,19 @@ class ThresholdCrossingTransformer(
         return getattr(xp, "__name__", "") == "mlx.core"
 
     def _process_mlx_metal(self, message: AxisArray) -> AxisArray:
-        """Run the on-device Metal kernel for threshold detection + refractory."""
-        import mlx.core as mx
+        """Run the on-device Metal kernel for threshold detection + refractory.
 
+        Caller (``_process``) has already short-circuited empty messages, so this
+        always operates on at least one sample.
+        """
         from ezmsg.event.util.peak_mlx_metal import threshold_crossings_mlx_metal
-
-        data = message.data
-        n_samples = data.shape[0]
-        feature_shape = tuple(data.shape[1:])
-
-        if n_samples == 0:
-            # Empty chunk: nothing to update on the kernel; just return an empty events array.
-            return replace(message, data=mx.zeros((0,) + feature_shape, dtype=mx.int8))
 
         # _state.data carries the previous chunk's last sample as the over/under reference.
         # _reset_state seeded it with this stream's first sample, so the kernel will treat
         # the first sample as never-a-crossing, matching the cpu path's convention.
         prev_sample = self._state.data[0]
         events, last_sample, elapsed_out = threshold_crossings_mlx_metal(
-            data,
+            message.data,
             prev_sample,
             self._state.elapsed,
             threshold=self.settings.threshold,
@@ -197,6 +191,24 @@ class ThresholdCrossingTransformer(
         self._state.data = last_sample[None, ...]
         self._state.elapsed = elapsed_out
         return replace(message, data=events)
+
+    def _empty_output(self, message: AxisArray, xp) -> AxisArray:
+        """Build an empty output AxisArray that matches the active path's container/dtype."""
+        feature_shape = tuple(message.data.shape[1:])
+        if self._can_use_mlx_metal(xp, message.data):
+            import mlx.core as mx
+
+            return replace(message, data=mx.zeros((0,) + feature_shape, dtype=mx.int8))
+        out_dtype = message.data.dtype if self.settings.return_peak_val else bool
+        if self.settings.output_format == OutputFormat.SPARSE:
+            data = sparse.COO(
+                np.zeros((message.data.ndim, 0), dtype=np.int64),
+                data=np.array([], dtype=out_dtype),
+                shape=message.data.shape,
+            )
+        else:
+            data = xp.zeros(message.data.shape, dtype=out_dtype)
+        return replace(message, data=data)
 
     def _process(self, message: AxisArray) -> AxisArray:
         """
@@ -220,6 +232,12 @@ class ThresholdCrossingTransformer(
                 dims=["time"] + message.dims[:ax_idx] + message.dims[ax_idx + 1 :],
             )
 
+        # An empty chunk produces an empty output regardless of backend or buffered state
+        # (the cpu path's prepended buffer alone yields no new crossings, and the metal
+        # kernel has nothing to scan). Short-circuit before backend dispatch.
+        if message.data.shape[0] == 0:
+            return self._empty_output(message, xp)
+
         # MLX-on-device fast path: bypass the numpy event-detection logic and run
         # the fused metal kernel for threshold detection + refractory enforcement.
         if self._can_use_mlx_metal(xp, message.data):
@@ -238,19 +256,6 @@ class ThresholdCrossingTransformer(
         data = xp.concat((self._state.data, message.data), axis=0)
         # Take note of how many samples were prepended. We will need this later when we modify `overs`.
         n_prepended = self._state.data.shape[0]
-
-        if data.shape[0] == 0:
-            # No data at all (empty buffer + empty message). Return empty output.
-            out_dtype = data.dtype if self.settings.return_peak_val else bool
-            if self.settings.output_format == OutputFormat.SPARSE:
-                result = sparse.COO(
-                    np.zeros((data.ndim, 0), dtype=np.int64),
-                    data=np.array([], dtype=out_dtype),
-                    shape=data.shape,
-                )
-            else:
-                result = xp.zeros(data.shape, dtype=out_dtype)
-            return replace(message, data=result)
 
         if n_prepended == 0:
             # No reference sample from previous iteration (e.g. first message after an empty-data reset).
