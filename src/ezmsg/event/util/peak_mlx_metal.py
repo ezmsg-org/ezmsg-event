@@ -18,7 +18,7 @@ import mlx.core as mx
 
 def threshold_crossings_mlx_metal(
     x,
-    prev_over,
+    prev_sample,
     elapsed,
     *,
     threshold: float,
@@ -28,8 +28,11 @@ def threshold_crossings_mlx_metal(
 
     Args:
         x: MLX array with shape ``(n_samples, *features)``.
-        prev_over: Int8 MLX array shaped ``(*features,)``; nonzero indicates
-            that the sample preceding this chunk was over threshold.
+        prev_sample: Float32 MLX array shaped ``(*features,)`` — the sample
+            value immediately preceding this chunk (used as the over/under
+            reference for the first crossing comparison). On the very first
+            chunk, pass the chunk's own first sample so it is never reported
+            as a crossing.
         elapsed: Int32 MLX array shaped ``(*features,)`` tracking samples
             since the last accepted crossing (initialise to ``refrac_width + 1``
             so the first sample is eligible).
@@ -41,9 +44,11 @@ def threshold_crossings_mlx_metal(
             previous accepted crossing. Values ``<= 2`` disable the gate.
 
     Returns:
-        ``(events, prev_over_out, elapsed_out)`` where ``events`` is an int8
+        ``(events, last_sample, elapsed_out)`` where ``events`` is an int8
         MLX array shaped ``(n_samples, *features)`` with 1 at each accepted
-        crossing (0 elsewhere). The state outputs are shaped like the inputs.
+        crossing (0 elsewhere). ``last_sample`` is float32 — the chunk's final
+        sample, ready to be fed back as ``prev_sample`` next call. The state
+        outputs are shaped like the state inputs.
     """
     if x.ndim < 1:
         raise ValueError(f"x must have at least 1 dimension; got {x.ndim}")
@@ -59,19 +64,19 @@ def threshold_crossings_mlx_metal(
         events = mx.zeros((0,) + batch_shape, dtype=mx.int8)
         return (
             events,
-            prev_over.astype(mx.int8).reshape(batch_shape),
+            prev_sample.astype(mx.float32).reshape(batch_shape),
             elapsed.astype(mx.int32).reshape(batch_shape),
         )
 
     x_flat = x_f32.reshape(n_samples, n_channels)
-    prev_flat = prev_over.astype(mx.int8).reshape(n_channels)
+    prev_sample_flat = prev_sample.astype(mx.float32).reshape(n_channels)
     elapsed_flat = elapsed.astype(mx.int32).reshape(n_channels)
     n_words = (n_samples + 31) // 32
 
     params = mx.array([float(threshold)], dtype=mx.float32)
 
-    crossing_words, final_over = _crossing_words_kernel(
-        inputs=[x_flat, prev_flat, params],
+    crossing_words, last_sample = _crossing_words_kernel(
+        inputs=[x_flat, prev_sample_flat, params],
         template=[
             ("N_SAMPLES", n_samples),
             ("N_CHANNELS", n_channels),
@@ -80,11 +85,11 @@ def threshold_crossings_mlx_metal(
         grid=(n_words, n_channels, 1),
         threadgroup=(1, 1, 1),
         output_shapes=[(n_words, n_channels), (n_channels,)],
-        output_dtypes=[mx.uint32, mx.int8],
+        output_dtypes=[mx.uint32, mx.float32],
     )
 
-    events_flat, prev_out, elapsed_out = _refractory_dense_kernel(
-        inputs=[crossing_words, final_over, elapsed_flat],
+    events_flat, elapsed_out = _refractory_dense_kernel(
+        inputs=[crossing_words, elapsed_flat],
         template=[
             ("N_SAMPLES", n_samples),
             ("N_CHANNELS", n_channels),
@@ -93,14 +98,14 @@ def threshold_crossings_mlx_metal(
         ],
         grid=(n_channels, 1, 1),
         threadgroup=(1, 1, 1),
-        output_shapes=[(n_samples, n_channels), (n_channels,), (n_channels,)],
-        output_dtypes=[mx.int8, mx.int8, mx.int32],
+        output_shapes=[(n_samples, n_channels), (n_channels,)],
+        output_dtypes=[mx.int8, mx.int32],
     )
 
     events = events_flat.reshape((n_samples,) + batch_shape)
     return (
         events,
-        prev_out.reshape(batch_shape),
+        last_sample.reshape(batch_shape),
         elapsed_out.reshape(batch_shape),
     )
 
@@ -114,13 +119,8 @@ _CROSSING_WORDS_KERNEL_SOURCE = r"""
 
     float threshold = params[0];
     uint start = word * 32;
-    uint prev = 0;
-    if (start == 0) {
-        prev = prev_over_in[ch] != 0;
-    } else {
-        float prev_sample = x_in[(start - 1) * N_CHANNELS + ch];
-        prev = threshold >= 0.0f ? (prev_sample >= threshold) : (prev_sample <= threshold);
-    }
+    float ref_sample = start == 0 ? prev_sample_in[ch] : x_in[(start - 1) * N_CHANNELS + ch];
+    uint prev = threshold >= 0.0f ? (ref_sample >= threshold) : (ref_sample <= threshold);
 
     uint bits = 0;
     for (uint bit = 0; bit < 32; ++bit) {
@@ -139,7 +139,7 @@ _CROSSING_WORDS_KERNEL_SOURCE = r"""
     crossing_words_out[word * N_CHANNELS + ch] = bits;
 
     if (word == N_WORDS - 1) {
-        final_over_out[ch] = prev ? 1 : 0;
+        last_sample_out[ch] = x_in[(N_SAMPLES - 1) * N_CHANNELS + ch];
     }
 """
 
@@ -184,23 +184,21 @@ _REFRACTORY_DENSE_KERNEL_SOURCE = r"""
     }
 
     elapsed += int(N_SAMPLES) - 1 - last_t;
-
-    prev_over_out[ch] = final_over_in[ch];
     elapsed_out[ch] = elapsed;
 """
 
 
 _crossing_words_kernel = mx.fast.metal_kernel(
     name="threshold_crossing_words",
-    input_names=["x_in", "prev_over_in", "params"],
-    output_names=["crossing_words_out", "final_over_out"],
+    input_names=["x_in", "prev_sample_in", "params"],
+    output_names=["crossing_words_out", "last_sample_out"],
     source=_CROSSING_WORDS_KERNEL_SOURCE,
 )
 
 
 _refractory_dense_kernel = mx.fast.metal_kernel(
     name="threshold_refractory_dense",
-    input_names=["crossing_words_in", "final_over_in", "elapsed_in"],
-    output_names=["events_out", "prev_over_out", "elapsed_out"],
+    input_names=["crossing_words_in", "elapsed_in"],
+    output_names=["events_out", "elapsed_out"],
     source=_REFRACTORY_DENSE_KERNEL_SOURCE,
 )

@@ -100,10 +100,6 @@ class ThresholdCrossingState:
     Lives in the input's namespace: numpy (flat ``(prod(features),)``) for the cpu
     event-loop path, MLX (shape ``(*features,)``) for the on-device Metal path."""
 
-    # MLX-metal-only state (lazy-init on the first non-empty chunk so it can read the input's first sample).
-    mlx_prev_over: object | None = None
-    """Int8 MLX array shaped ``(*features,)`` — was the previous chunk's last sample over threshold."""
-
 
 class ThresholdCrossingTransformer(
     BaseStatefulTransformer[ThresholdSettings, AxisArray, AxisArray, ThresholdCrossingState]
@@ -157,9 +153,6 @@ class ThresholdCrossingTransformer(
             n_features = math.prod(feature_shape) if feature_shape else 1
             self._state.elapsed = np.full((n_features,), self._state.refrac_width + 1, dtype=np.int32)
 
-        # Reset MLX prev-over; it is lazy-initialised in _process_mlx_metal on the first non-empty chunk.
-        self._state.mlx_prev_over = None
-
     def _can_use_mlx_metal(self, xp, data) -> bool:
         """The Metal kernel runs automatically for MLX + DENSE + a config it supports.
 
@@ -190,21 +183,18 @@ class ThresholdCrossingTransformer(
             # Empty chunk: nothing to update on the kernel; just return an empty events array.
             return replace(message, data=mx.zeros((0,) + feature_shape, dtype=mx.int8))
 
-        # Lazy-init prev-over from the first non-empty chunk's leading sample.
-        if self._state.mlx_prev_over is None:
-            thr = self.settings.threshold
-            first = data[0]
-            over = first >= thr if thr >= 0 else first <= thr
-            self._state.mlx_prev_over = over.astype(mx.int8)
-
-        events, prev_over_out, elapsed_out = threshold_crossings_mlx_metal(
+        # _state.data carries the previous chunk's last sample as the over/under reference.
+        # _reset_state seeded it with this stream's first sample, so the kernel will treat
+        # the first sample as never-a-crossing, matching the cpu path's convention.
+        prev_sample = self._state.data[0]
+        events, last_sample, elapsed_out = threshold_crossings_mlx_metal(
             data,
-            self._state.mlx_prev_over,
+            prev_sample,
             self._state.elapsed,
             threshold=self.settings.threshold,
             refrac_width=self._state.refrac_width,
         )
-        self._state.mlx_prev_over = prev_over_out
+        self._state.data = last_sample[None, ...]
         self._state.elapsed = elapsed_out
         return replace(message, data=events)
 
