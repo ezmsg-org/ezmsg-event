@@ -94,15 +94,15 @@ class ThresholdCrossingState:
     data_raw: npt.NDArray | None = None
     """Keep track of the raw data so we can return_peak_val. Only needed if using the scaler."""
 
-    elapsed: npt.NDArray | None = None
-    """Track number of samples since last event for each feature. Used especially for refractory period."""
+    elapsed: object | None = None
+    """Int32 array, samples since last accepted crossing per feature.
 
-    # MLX-metal-only state (lazy-init in _process when the metal path runs).
+    Lives in the input's namespace: numpy (flat ``(prod(features),)``) for the cpu
+    event-loop path, MLX (shape ``(*features,)``) for the on-device Metal path."""
+
+    # MLX-metal-only state (lazy-init on the first non-empty chunk so it can read the input's first sample).
     mlx_prev_over: object | None = None
     """Int8 MLX array shaped ``(*features,)`` — was the previous chunk's last sample over threshold."""
-
-    mlx_elapsed: object | None = None
-    """Int32 MLX array shaped ``(*features,)`` — samples since last accepted crossing."""
 
 
 class ThresholdCrossingTransformer(
@@ -145,13 +145,20 @@ class ThresholdCrossingTransformer(
         #  and potentially for aligning on peak or returning the peak value.
         self._state.data = first_samp if self._state.scaler is None else xp.zeros_like(first_samp)
 
-        # Initialize the count of samples since last event for each feature. We initialize at refrac_width+1
-        #  to ensure that even the first sample is eligible for events.
-        self._state.elapsed = np.zeros((math.prod(data.shape[1:]),), dtype=int) + (self._state.refrac_width + 1)
+        # Samples since last accepted crossing, per feature. Initialise at refrac_width+1 so
+        # the first sample is eligible. Live in the namespace the active path will consume:
+        # MLX feature-shaped int32 if Metal will run, numpy flat int32 otherwise.
+        feature_shape = tuple(data.shape[1:])
+        if self._can_use_mlx_metal(xp, message.data):
+            import mlx.core as mx
 
-        # Reset MLX-metal-path state; it is lazy-initialised in _process_mlx_metal on first non-empty chunk.
+            self._state.elapsed = mx.full(feature_shape, self._state.refrac_width + 1, dtype=mx.int32)
+        else:
+            n_features = math.prod(feature_shape) if feature_shape else 1
+            self._state.elapsed = np.full((n_features,), self._state.refrac_width + 1, dtype=np.int32)
+
+        # Reset MLX prev-over; it is lazy-initialised in _process_mlx_metal on the first non-empty chunk.
         self._state.mlx_prev_over = None
-        self._state.mlx_elapsed = None
 
     def _can_use_mlx_metal(self, xp, data) -> bool:
         """The Metal kernel runs automatically for MLX + DENSE + a config it supports.
@@ -183,24 +190,22 @@ class ThresholdCrossingTransformer(
             # Empty chunk: nothing to update on the kernel; just return an empty events array.
             return replace(message, data=mx.zeros((0,) + feature_shape, dtype=mx.int8))
 
-        # Lazy-init kernel state on the first non-empty chunk.
+        # Lazy-init prev-over from the first non-empty chunk's leading sample.
         if self._state.mlx_prev_over is None:
             thr = self.settings.threshold
             first = data[0]
             over = first >= thr if thr >= 0 else first <= thr
             self._state.mlx_prev_over = over.astype(mx.int8)
-        if self._state.mlx_elapsed is None:
-            self._state.mlx_elapsed = mx.full(feature_shape, self._state.refrac_width + 1, dtype=mx.int32)
 
         events, prev_over_out, elapsed_out = threshold_crossings_mlx_metal(
             data,
             self._state.mlx_prev_over,
-            self._state.mlx_elapsed,
+            self._state.elapsed,
             threshold=self.settings.threshold,
             refrac_width=self._state.refrac_width,
         )
         self._state.mlx_prev_over = prev_over_out
-        self._state.mlx_elapsed = elapsed_out
+        self._state.elapsed = elapsed_out
         return replace(message, data=events)
 
     def _process(self, message: AxisArray) -> AxisArray:
