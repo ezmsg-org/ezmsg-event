@@ -190,8 +190,8 @@ def _require_mlx():
         (-1.0, 0.001, 17),  # Negative threshold path; refractory effectively disabled.
     ],
 )
-def test_threshold_crossing_mlx_metal_matches_numpy_dense(threshold: float, refrac_dur: float, stride: int):
-    """The MLX Metal path must produce identical events to the numpy DENSE path across chunk boundaries."""
+def test_threshold_crossing_mlx_dense_matches_numpy_dense(threshold: float, refrac_dur: float, stride: int):
+    """MLX inputs (which auto-route through Metal) must match numpy DENSE output across chunk boundaries."""
     mx = _require_mlx()
     fs = 1000.0
     data = np.zeros((1000, 4), dtype=np.float32)
@@ -202,35 +202,34 @@ def test_threshold_crossing_mlx_metal_matches_numpy_dense(threshold: float, refr
 
     chunks = [data[:137], data[137:503], data[503:777], data[777:]]
 
-    def run(use_metal: bool) -> list[np.ndarray]:
+    def run(use_mlx: bool) -> list[np.ndarray]:
         proc = ThresholdCrossingTransformer(
             ThresholdSettings(
                 threshold=threshold,
                 refrac_dur=refrac_dur,
                 output_format=OutputFormat.DENSE,
-                use_mlx_metal=use_metal,
             )
         )
         outs, samp_off = [], 0
         for chunk in chunks:
-            data_in = mx.array(chunk) if use_metal else chunk
+            data_in = mx.array(chunk) if use_mlx else chunk
             msg = AxisArray(
                 data=data_in,
                 dims=["time", "ch"],
                 axes={"time": AxisArray.TimeAxis(fs=fs, offset=samp_off / fs)},
             )
             out = proc(msg)
-            if use_metal:
+            if use_mlx:
                 mx.eval(out.data)
             outs.append(np.asarray(out.data))
             samp_off += chunk.shape[0]
         return outs
 
-    cpu = run(False)
-    metal = run(True)
-    for cpu_chunk, metal_chunk in zip(cpu, metal):
-        assert cpu_chunk.shape == metal_chunk.shape
-        np.testing.assert_array_equal(cpu_chunk != 0, metal_chunk != 0)
+    np_outs = run(False)
+    mlx_outs = run(True)
+    for np_chunk, mlx_chunk in zip(np_outs, mlx_outs):
+        assert np_chunk.shape == mlx_chunk.shape
+        np.testing.assert_array_equal(np_chunk != 0, mlx_chunk != 0)
 
 
 @pytest.mark.parametrize("return_peak_val", [False, True])

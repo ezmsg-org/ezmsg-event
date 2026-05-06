@@ -67,13 +67,12 @@ class ThresholdSettings(ez.Settings):
 
     output_format: OutputFormat = OutputFormat.SPARSE
     """Output container. ``SPARSE`` (default) emits ``sparse.COO``. ``DENSE`` emits a
-    dense array in the input's namespace so accelerator-resident data stays on device."""
+    dense array in the input's namespace so accelerator-resident data stays on device.
 
-    use_mlx_metal: bool = False
-    """If True, MLX inputs use the on-device Metal kernel for threshold detection +
-    refractory enforcement (Apple Silicon only). Requires ``output_format=DENSE`` and
-    a basic configuration: no ``align_on_peak``, ``return_peak_val``, ``min_peak_dur``,
-    or ``auto_scale_tau``. Ignored for non-MLX inputs."""
+    When ``DENSE`` is combined with an MLX input and a basic configuration (no
+    ``align_on_peak``, ``return_peak_val``, ``min_peak_dur``, or ``auto_scale_tau``),
+    threshold detection + refractory enforcement run via an on-device Metal kernel
+    automatically — there is no separate opt-in toggle."""
 
 
 @processor_state
@@ -155,8 +154,11 @@ class ThresholdCrossingTransformer(
         self._state.mlx_elapsed = None
 
     def _can_use_mlx_metal(self, xp, data) -> bool:
-        if not self.settings.use_mlx_metal:
-            return False
+        """The Metal kernel runs automatically for MLX + DENSE + a config it supports.
+
+        It cannot recover peak values, align on peaks, enforce a min peak width, or
+        auto-scale, so any of those settings disable the path.
+        """
         if self.settings.output_format != OutputFormat.DENSE:
             return False
         if self.settings.align_on_peak or self.settings.return_peak_val:
