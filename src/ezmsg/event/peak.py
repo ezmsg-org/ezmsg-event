@@ -4,11 +4,15 @@ Detects peaks in a signal.
 .. note::
     This module supports the `Array API standard <https://data-apis.org/array-api/>`_,
     enabling use with NumPy, CuPy, PyTorch, and other compatible array libraries.
-    Signal data operations are array-API compliant. Event detection and sparse
-    output use NumPy regardless of input backend. Output is always sparse.COO.
+    Signal data operations are array-API compliant. Event detection itself uses
+    NumPy regardless of input backend. The output container is configurable via
+    :class:`OutputFormat`: ``SPARSE`` produces a ``sparse.COO`` (default), while
+    ``DENSE`` produces a dense array in the input's namespace so downstream
+    consumers can keep data on accelerators.
 """
 
 import math
+from enum import Enum
 
 import ezmsg.core as ez
 import numpy as np
@@ -22,6 +26,20 @@ from ezmsg.baseproc import (
 )
 from ezmsg.sigproc.scaler import AdaptiveStandardScalerTransformer
 from ezmsg.util.messages.axisarray import AxisArray, replace  # slice_along_axis,
+
+
+class OutputFormat(str, Enum):
+    """Output container for :class:`ThresholdCrossingTransformer`."""
+
+    SPARSE = "sparse"
+    """Emit a ``sparse.COO`` array with one entry per accepted event (default)."""
+
+    DENSE = "dense"
+    """Emit a dense array in the input's namespace, with non-zero entries at event positions.
+
+    Use this when downstream nodes are namespace-aware (e.g.,
+    :class:`ezmsg.event.kernel_activation.BinnedKernelActivation`) and you want
+    the data to stay on its current device (e.g., MLX, CuPy)."""
 
 
 class ThresholdSettings(ez.Settings):
@@ -46,6 +64,10 @@ class ThresholdSettings(ez.Settings):
 
     auto_scale_tau: float = 0.0
     """If > 0, the data will be passed through a standard scaler prior to thresholding."""
+
+    output_format: OutputFormat = OutputFormat.SPARSE
+    """Output container. ``SPARSE`` (default) emits ``sparse.COO``. ``DENSE`` emits a
+    dense array in the input's namespace so accelerator-resident data stays on device."""
 
 
 @processor_state
@@ -152,12 +174,16 @@ class ThresholdCrossingTransformer(
         n_prepended = self._state.data.shape[0]
 
         if data.shape[0] == 0:
-            # No data at all (empty buffer + empty message). Return empty sparse output.
-            result = sparse.COO(
-                np.zeros((data.ndim, 0), dtype=np.int64),
-                data=np.array([], dtype=data.dtype if self.settings.return_peak_val else bool),
-                shape=data.shape,
-            )
+            # No data at all (empty buffer + empty message). Return empty output.
+            out_dtype = data.dtype if self.settings.return_peak_val else bool
+            if self.settings.output_format == OutputFormat.SPARSE:
+                result = sparse.COO(
+                    np.zeros((data.ndim, 0), dtype=np.int64),
+                    data=np.array([], dtype=out_dtype),
+                    shape=data.shape,
+                )
+            else:
+                result = xp.zeros(data.shape, dtype=out_dtype)
             return replace(message, data=result)
 
         if n_prepended == 0:
@@ -334,17 +360,22 @@ class ThresholdCrossingTransformer(
         self._state.elapsed[tuple(cross_idx[1:])] = hold_idx - cross_idx[0]
         #  Note: multiple-write to same index ^ is fine because it is sorted and the last value for each is correct.
 
-        # Prepare sparse matrix output
+        # Prepare output.
         # Note: The first of the held back samples for next iteration is part of this iteration's return.
         #  Likewise, the first prepended sample on this iteration was part of the previous iteration's return.
         n_out_samps = hold_idx
         t0 = message.axes["time"].offset - (n_prepended - 1) * message.axes["time"].gain
         cross_idx[0] -= 1  # Discard first prepended sample.
-        result = sparse.COO(
-            cross_idx,
-            data=result_val,
-            shape=(n_out_samps,) + data.shape[1:],
-        )
+        out_shape = (n_out_samps,) + data.shape[1:]
+        if self.settings.output_format == OutputFormat.SPARSE:
+            result = sparse.COO(cross_idx, data=result_val, shape=out_shape)
+        else:
+            # Dense in the input's namespace so accelerator data stays on device downstream.
+            out_dtype = data.dtype if self.settings.return_peak_val else bool
+            dense_np = np.zeros(out_shape, dtype=out_dtype)
+            if cross_idx[0].size > 0:
+                dense_np[tuple(cross_idx)] = result_val
+            result = dense_np if xp is np else xp.asarray(dense_np)
         msg_out = replace(
             message,
             data=result,

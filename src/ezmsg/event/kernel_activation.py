@@ -1,10 +1,18 @@
 """
-Compute binned kernel activation from sparse events.
+Compute binned kernel activation from events.
 
 This module provides efficient computation of kernel-convolved features
 at a lower output rate than the input. For exponential and alpha kernels,
 uses a state-based approach that is O(n_events + n_bins) instead of
 O(n_samples).
+
+Input may be either ``sparse.COO`` (the typical output of
+:class:`ezmsg.event.peak.ThresholdCrossingTransformer` in default mode) or a
+dense array (from the same transformer with ``output_format=DENSE``). When the
+input is dense and the configuration is COUNT + SUM (the rate-computation
+case), the binning runs on the input's array namespace and stays on device
+(e.g., MLX, CuPy). Other configurations with dense input fall back to
+event-extraction and use the same code path as sparse input.
 """
 
 from enum import Enum
@@ -12,6 +20,8 @@ from enum import Enum
 import ezmsg.core as ez
 import numpy as np
 import numpy.typing as npt
+import sparse
+from array_api_compat import get_namespace, is_numpy_array
 from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
@@ -197,6 +207,31 @@ class BinnedKernelActivation(
         return self._state.activation[channel]
 
     def _process(self, message: AxisArray) -> AxisArray:
+        """Compute binned activation from sparse or dense event input.
+
+        Dispatch:
+            - Dense input + COUNT + SUM: fast path that stays on the input's array
+              namespace (e.g., MLX, CuPy on device).
+            - Dense input + any other config: extract events from non-zero entries
+              and use the same code path as sparse input.
+            - Sparse input: existing event-based path.
+        """
+        data = message.data
+        is_sparse_input = isinstance(data, sparse.SparseArray)
+
+        if not is_sparse_input:
+            if (
+                self.settings.kernel_type == ActivationKernelType.COUNT
+                and self.settings.aggregation == BinAggregation.SUM
+            ):
+                return self._process_dense_count_sum(message)
+            # Fall back: convert dense to sparse so the existing event-based path can run.
+            data_np = data if is_numpy_array(data) else np.asarray(data)
+            message = replace(message, data=sparse.COO.from_numpy(data_np))
+
+        return self._process_events(message)
+
+    def _process_events(self, message: AxisArray) -> AxisArray:
         """Compute binned activation from sparse events."""
         sparse_data = message.data
         n_samples = sparse_data.shape[0]
@@ -334,6 +369,101 @@ class BinnedKernelActivation(
         # The first bin starts at (input_offset - accumulator_time)
         input_offset = message.axes["time"].offset if "time" in message.axes else 0.0
         accumulator_time = accumulator_before / self._state.fs
+        output_offset = input_offset - accumulator_time
+
+        return replace(
+            message,
+            data=output,
+            axes={
+                **message.axes,
+                "time": AxisArray.TimeAxis(
+                    fs=1.0 / self.settings.bin_duration,
+                    offset=output_offset,
+                ),
+            },
+        )
+
+    def _process_dense_count_sum(self, message: AxisArray) -> AxisArray:
+        """Fast path: dense input + COUNT kernel + SUM aggregation.
+
+        Bins are summed using cumulative-sum arithmetic in the input's array
+        namespace, so accelerator-resident inputs (MLX, CuPy) stay on device.
+        Carry-over for the partial bin spanning chunk boundaries is held in
+        ``state.activation`` (numpy) and shuttled across boundaries.
+        """
+        xp = get_namespace(message.data)
+        data = message.data
+        n_samples = data.shape[0]
+        feature_shape = tuple(data.shape[1:])
+
+        samples_per_bin = self.settings.bin_duration * self._state.fs
+        accumulator_before = self._state.bin_accumulator
+        total_samples = n_samples + accumulator_before
+        n_bins = int(total_samples / samples_per_bin)
+
+        # Per-sample contribution: 1 per non-zero, or the value itself if scaling.
+        if n_samples == 0:
+            contrib = xp.zeros((0,) + feature_shape, dtype=xp.float64)
+        elif self.settings.scale_by_value:
+            contrib = xp.astype(data, xp.float64)
+        else:
+            contrib = xp.astype(data != 0, xp.float64)
+
+        # Pull state into the input namespace for on-device math.
+        overflow_xp = xp.asarray(self._state.activation.reshape(feature_shape), dtype=xp.float64)
+
+        if n_bins == 0:
+            # No complete bins this chunk — accumulate everything into the carry-over.
+            new_overflow = overflow_xp + (xp.sum(contrib, axis=0) if n_samples > 0 else overflow_xp * 0)
+            self._state.activation = np.asarray(new_overflow).reshape(self._state.activation.shape)
+            self._state.bin_accumulator = total_samples
+            return replace(
+                message,
+                data=xp.zeros((0,) + feature_shape, dtype=xp.float64),
+                axes={
+                    **message.axes,
+                    "time": replace(message.axes["time"], gain=self.settings.bin_duration),
+                },
+            )
+
+        # Bin boundaries (in input-sample space, integer-truncated as in the event-based path).
+        first_bin_end = samples_per_bin - accumulator_before
+        bin_ends_float = first_bin_end + np.arange(n_bins) * samples_per_bin
+        bin_end_samples = bin_ends_float.astype(np.int64)
+        bin_start_samples = np.concatenate(([np.int64(0)], bin_end_samples[:-1]))
+
+        # Cumulative sum, prepended with zeros so cumsum_padded[k] = sum(contrib[:k]).
+        cumsum = xp.cumulative_sum(contrib, axis=0)
+        zero_row = xp.zeros((1,) + feature_shape, dtype=cumsum.dtype)
+        cumsum_padded = xp.concat((zero_row, cumsum), axis=0)
+
+        end_idx = xp.asarray(bin_end_samples)
+        start_idx = xp.asarray(bin_start_samples)
+        bin_sums = xp.take(cumsum_padded, end_idx, axis=0) - xp.take(cumsum_padded, start_idx, axis=0)
+
+        # Add carry-over from the previous chunk's partial bin into bin 0.
+        overflow_pad_first = overflow_xp[None, ...]
+        if n_bins > 1:
+            overflow_pad_rest = xp.zeros((n_bins - 1,) + feature_shape, dtype=bin_sums.dtype)
+            overflow_pad = xp.concat((overflow_pad_first, overflow_pad_rest), axis=0)
+        else:
+            overflow_pad = overflow_pad_first
+        output = bin_sums + overflow_pad
+
+        # New carry-over: events past the last complete bin remain in the partial bin.
+        last_bin_end = int(bin_end_samples[-1])
+        if last_bin_end < n_samples:
+            new_overflow = xp.sum(contrib[last_bin_end:], axis=0)
+        else:
+            new_overflow = xp.zeros(feature_shape, dtype=cumsum.dtype)
+        self._state.activation = np.asarray(new_overflow).reshape(self._state.activation.shape)
+        self._state.bin_accumulator = total_samples - n_bins * samples_per_bin
+
+        if self.settings.rate_normalize:
+            output = output / self.settings.bin_duration
+
+        accumulator_time = accumulator_before / self._state.fs
+        input_offset = message.axes["time"].offset if "time" in message.axes else 0.0
         output_offset = input_offset - accumulator_time
 
         return replace(

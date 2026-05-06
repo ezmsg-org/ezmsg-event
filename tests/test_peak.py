@@ -12,7 +12,12 @@ from ezmsg.util.messagelogger import MessageLogger
 from ezmsg.util.messages.chunker import ArrayChunker, array_chunker
 from ezmsg.util.terminate import TerminateOnTotal
 
-from ezmsg.event.peak import ThresholdCrossing, ThresholdCrossingTransformer, ThresholdSettings
+from ezmsg.event.peak import (
+    OutputFormat,
+    ThresholdCrossing,
+    ThresholdCrossingTransformer,
+    ThresholdSettings,
+)
 from ezmsg.event.util.simulate import generate_white_noise_with_events
 
 
@@ -166,6 +171,46 @@ def test_threshold_crossing_empty_time_after_init(return_peak_val: bool, auto_sc
     out2 = proc(msg2)
     assert isinstance(out2.data, sparse.SparseArray)
     assert out2.data.shape[1] == N_CH
+
+
+@pytest.mark.parametrize("return_peak_val", [False, True])
+def test_threshold_crossing_dense_matches_sparse(return_peak_val: bool):
+    """OutputFormat.DENSE must match sparse output element-for-element after densification."""
+    fs = 30_000.0
+    dur = 0.5
+    n_chans = 16
+    threshold = 2.5
+    rate_range = (1, 100)
+    chunk_dur = 0.02
+    chunk_len = int(fs * chunk_dur)
+    refrac_dur = 0.001
+
+    in_dat = generate_white_noise_with_events(fs, dur, n_chans, rate_range, chunk_dur, threshold)
+
+    def run(output_format: OutputFormat):
+        proc = ThresholdCrossingTransformer(
+            ThresholdSettings(
+                threshold=threshold,
+                refrac_dur=refrac_dur,
+                return_peak_val=return_peak_val,
+                output_format=output_format,
+            )
+        )
+        msg_gen = array_chunker(data=in_dat.copy(), chunk_len=chunk_len, axis=0, fs=fs, tzero=0.0)
+        return [proc(m) for m in msg_gen]
+
+    sp_msgs = run(OutputFormat.SPARSE)
+    ds_msgs = run(OutputFormat.DENSE)
+
+    assert len(sp_msgs) == len(ds_msgs)
+    for sp_msg, ds_msg in zip(sp_msgs, ds_msgs):
+        assert isinstance(sp_msg.data, sparse.SparseArray)
+        assert not isinstance(ds_msg.data, sparse.SparseArray)
+        assert sp_msg.data.shape == ds_msg.data.shape
+        assert ds_msg.data.dtype == (in_dat.dtype if return_peak_val else np.bool_)
+        np.testing.assert_array_equal(sp_msg.data.todense(), ds_msg.data)
+        assert sp_msg.axes["time"].offset == ds_msg.axes["time"].offset
+        assert sp_msg.axes["time"].gain == ds_msg.axes["time"].gain
 
 
 @pytest.mark.parametrize("return_peak_val", [False, True])
