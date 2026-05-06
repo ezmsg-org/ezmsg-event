@@ -132,7 +132,8 @@ class BinnedKernelActivation(
         n_channels = message.data.shape[message.get_axis_idx("ch")] if "ch" in message.dims else 1
         if "time" not in message.axes or not hasattr(message.axes["time"], "gain"):
             raise ValueError("Could not determine sample rate from input message")
-        return hash((message.data.ndim, message.data.dtype.kind, n_channels, message.axes["time"].gain))
+        # str(dtype) works for numpy ('bool', 'float32', ...) and mlx (which doesn't expose dtype.kind).
+        return hash((message.data.ndim, str(message.data.dtype), n_channels, message.axes["time"].gain))
 
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
@@ -402,15 +403,17 @@ class BinnedKernelActivation(
         n_bins = int(total_samples / samples_per_bin)
 
         # Per-sample contribution: 1 per non-zero, or the value itself if scaling.
+        # Use the .astype() method form so the same call works for both numpy and mlx
+        # (mlx.core has no top-level astype).
         if n_samples == 0:
-            contrib = xp.zeros((0,) + feature_shape, dtype=xp.float64)
+            contrib = xp.zeros((0,) + feature_shape, dtype=xp.float32)
         elif self.settings.scale_by_value:
-            contrib = xp.astype(data, xp.float64)
+            contrib = data.astype(xp.float32)
         else:
-            contrib = xp.astype(data != 0, xp.float64)
+            contrib = (data != 0).astype(xp.float32)
 
         # Pull state into the input namespace for on-device math.
-        overflow_xp = xp.asarray(self._state.activation.reshape(feature_shape), dtype=xp.float64)
+        overflow_xp = xp.asarray(self._state.activation.reshape(feature_shape)).astype(xp.float32)
 
         if n_bins == 0:
             # No complete bins this chunk — accumulate everything into the carry-over.
@@ -419,7 +422,7 @@ class BinnedKernelActivation(
             self._state.bin_accumulator = total_samples
             return replace(
                 message,
-                data=xp.zeros((0,) + feature_shape, dtype=xp.float64),
+                data=xp.zeros((0,) + feature_shape, dtype=xp.float32),
                 axes={
                     **message.axes,
                     "time": replace(message.axes["time"], gain=self.settings.bin_duration),
@@ -433,7 +436,9 @@ class BinnedKernelActivation(
         bin_start_samples = np.concatenate(([np.int64(0)], bin_end_samples[:-1]))
 
         # Cumulative sum, prepended with zeros so cumsum_padded[k] = sum(contrib[:k]).
-        cumsum = xp.cumulative_sum(contrib, axis=0)
+        # Use cumsum (in both numpy and mlx); numpy via array_api_compat also exposes
+        # the standard `cumulative_sum`, but mlx does not.
+        cumsum = xp.cumsum(contrib, axis=0)
         zero_row = xp.zeros((1,) + feature_shape, dtype=cumsum.dtype)
         cumsum_padded = xp.concat((zero_row, cumsum), axis=0)
 

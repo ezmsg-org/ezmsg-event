@@ -69,6 +69,12 @@ class ThresholdSettings(ez.Settings):
     """Output container. ``SPARSE`` (default) emits ``sparse.COO``. ``DENSE`` emits a
     dense array in the input's namespace so accelerator-resident data stays on device."""
 
+    use_mlx_metal: bool = False
+    """If True, MLX inputs use the on-device Metal kernel for threshold detection +
+    refractory enforcement (Apple Silicon only). Requires ``output_format=DENSE`` and
+    a basic configuration: no ``align_on_peak``, ``return_peak_val``, ``min_peak_dur``,
+    or ``auto_scale_tau``. Ignored for non-MLX inputs."""
+
 
 @processor_state
 class ThresholdCrossingState:
@@ -91,6 +97,13 @@ class ThresholdCrossingState:
 
     elapsed: npt.NDArray | None = None
     """Track number of samples since last event for each feature. Used especially for refractory period."""
+
+    # MLX-metal-only state (lazy-init in _process when the metal path runs).
+    mlx_prev_over: object | None = None
+    """Int8 MLX array shaped ``(*features,)`` — was the previous chunk's last sample over threshold."""
+
+    mlx_elapsed: object | None = None
+    """Int32 MLX array shaped ``(*features,)`` — samples since last accepted crossing."""
 
 
 class ThresholdCrossingTransformer(
@@ -137,6 +150,57 @@ class ThresholdCrossingTransformer(
         #  to ensure that even the first sample is eligible for events.
         self._state.elapsed = np.zeros((math.prod(data.shape[1:]),), dtype=int) + (self._state.refrac_width + 1)
 
+        # Reset MLX-metal-path state; it is lazy-initialised in _process_mlx_metal on first non-empty chunk.
+        self._state.mlx_prev_over = None
+        self._state.mlx_elapsed = None
+
+    def _can_use_mlx_metal(self, xp, data) -> bool:
+        if not self.settings.use_mlx_metal:
+            return False
+        if self.settings.output_format != OutputFormat.DENSE:
+            return False
+        if self.settings.align_on_peak or self.settings.return_peak_val:
+            return False
+        if self.settings.min_peak_dur > 0.0 or self.settings.auto_scale_tau > 0.0:
+            return False
+        if is_numpy_array(data):
+            return False
+        return getattr(xp, "__name__", "") == "mlx.core"
+
+    def _process_mlx_metal(self, message: AxisArray) -> AxisArray:
+        """Run the on-device Metal kernel for threshold detection + refractory."""
+        import mlx.core as mx
+
+        from ezmsg.event.util.peak_mlx_metal import threshold_crossings_mlx_metal
+
+        data = message.data
+        n_samples = data.shape[0]
+        feature_shape = tuple(data.shape[1:])
+
+        if n_samples == 0:
+            # Empty chunk: nothing to update on the kernel; just return an empty events array.
+            return replace(message, data=mx.zeros((0,) + feature_shape, dtype=mx.int8))
+
+        # Lazy-init kernel state on the first non-empty chunk.
+        if self._state.mlx_prev_over is None:
+            thr = self.settings.threshold
+            first = data[0]
+            over = first >= thr if thr >= 0 else first <= thr
+            self._state.mlx_prev_over = over.astype(mx.int8)
+        if self._state.mlx_elapsed is None:
+            self._state.mlx_elapsed = mx.full(feature_shape, self._state.refrac_width + 1, dtype=mx.int32)
+
+        events, prev_over_out, elapsed_out = threshold_crossings_mlx_metal(
+            data,
+            self._state.mlx_prev_over,
+            self._state.mlx_elapsed,
+            threshold=self.settings.threshold,
+            refrac_width=self._state.refrac_width,
+        )
+        self._state.mlx_prev_over = prev_over_out
+        self._state.mlx_elapsed = elapsed_out
+        return replace(message, data=events)
+
     def _process(self, message: AxisArray) -> AxisArray:
         """
         Process incoming samples and detect threshold crossings.
@@ -158,6 +222,11 @@ class ThresholdCrossingTransformer(
                 data=xp.permute_dims(message.data, perm),
                 dims=["time"] + message.dims[:ax_idx] + message.dims[ax_idx + 1 :],
             )
+
+        # MLX-on-device fast path: bypass the numpy event-detection logic and run
+        # the fused metal kernel for threshold detection + refractory enforcement.
+        if self._can_use_mlx_metal(xp, message.data):
+            return self._process_mlx_metal(message)
 
         # Take a copy of the raw data if needed and prepend to our state data_raw
         #  This will only exist if we are autoscaling AND we need to capture the true peak value.
