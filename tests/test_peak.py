@@ -9,10 +9,16 @@ import sparse
 from conftest import CHUNK_LEN, FS, N_CH, make_dense_msg
 from ezmsg.util.messagecodec import message_log
 from ezmsg.util.messagelogger import MessageLogger
+from ezmsg.util.messages.axisarray import AxisArray
 from ezmsg.util.messages.chunker import ArrayChunker, array_chunker
 from ezmsg.util.terminate import TerminateOnTotal
 
-from ezmsg.event.peak import ThresholdCrossing, ThresholdCrossingTransformer, ThresholdSettings
+from ezmsg.event.peak import (
+    OutputFormat,
+    ThresholdCrossing,
+    ThresholdCrossingTransformer,
+    ThresholdSettings,
+)
 from ezmsg.event.util.simulate import generate_white_noise_with_events
 
 
@@ -166,6 +172,104 @@ def test_threshold_crossing_empty_time_after_init(return_peak_val: bool, auto_sc
     out2 = proc(msg2)
     assert isinstance(out2.data, sparse.SparseArray)
     assert out2.data.shape[1] == N_CH
+
+
+def _require_mlx():
+    mx = pytest.importorskip("mlx.core")
+    try:
+        mx.eval(mx.array([1.0], dtype=mx.float32))
+    except RuntimeError as exc:
+        pytest.skip(f"MLX device unavailable: {exc}")
+    return mx
+
+
+@pytest.mark.parametrize(
+    ("threshold", "refrac_dur", "stride"),
+    [
+        (1.0, 0.030, 31),  # PR's adversarial spacing — refractory bites every time.
+        (-1.0, 0.001, 17),  # Negative threshold path; refractory effectively disabled.
+    ],
+)
+def test_threshold_crossing_mlx_dense_matches_numpy_dense(threshold: float, refrac_dur: float, stride: int):
+    """MLX inputs (which auto-route through Metal) must match numpy DENSE output across chunk boundaries."""
+    mx = _require_mlx()
+    fs = 1000.0
+    data = np.zeros((1000, 4), dtype=np.float32)
+    sign = 1.0 if threshold >= 0 else -1.0
+    for ch in range(data.shape[1]):
+        for samp in range(ch + 1, data.shape[0], stride):
+            data[samp, ch] = 2.0 * sign
+
+    chunks = [data[:137], data[137:503], data[503:777], data[777:]]
+
+    def run(use_mlx: bool) -> list[np.ndarray]:
+        proc = ThresholdCrossingTransformer(
+            ThresholdSettings(
+                threshold=threshold,
+                refrac_dur=refrac_dur,
+                output_format=OutputFormat.DENSE,
+            )
+        )
+        outs, samp_off = [], 0
+        for chunk in chunks:
+            data_in = mx.array(chunk) if use_mlx else chunk
+            msg = AxisArray(
+                data=data_in,
+                dims=["time", "ch"],
+                axes={"time": AxisArray.TimeAxis(fs=fs, offset=samp_off / fs)},
+            )
+            out = proc(msg)
+            if use_mlx:
+                mx.eval(out.data)
+            outs.append(np.asarray(out.data))
+            samp_off += chunk.shape[0]
+        return outs
+
+    np_outs = run(False)
+    mlx_outs = run(True)
+    for np_chunk, mlx_chunk in zip(np_outs, mlx_outs):
+        assert np_chunk.shape == mlx_chunk.shape
+        np.testing.assert_array_equal(np_chunk != 0, mlx_chunk != 0)
+
+
+@pytest.mark.parametrize("return_peak_val", [False, True])
+def test_threshold_crossing_dense_matches_sparse(return_peak_val: bool):
+    """OutputFormat.DENSE must match sparse output element-for-element after densification."""
+    fs = 30_000.0
+    dur = 0.5
+    n_chans = 16
+    threshold = 2.5
+    rate_range = (1, 100)
+    chunk_dur = 0.02
+    chunk_len = int(fs * chunk_dur)
+    refrac_dur = 0.001
+
+    in_dat = generate_white_noise_with_events(fs, dur, n_chans, rate_range, chunk_dur, threshold)
+
+    def run(output_format: OutputFormat):
+        proc = ThresholdCrossingTransformer(
+            ThresholdSettings(
+                threshold=threshold,
+                refrac_dur=refrac_dur,
+                return_peak_val=return_peak_val,
+                output_format=output_format,
+            )
+        )
+        msg_gen = array_chunker(data=in_dat.copy(), chunk_len=chunk_len, axis=0, fs=fs, tzero=0.0)
+        return [proc(m) for m in msg_gen]
+
+    sp_msgs = run(OutputFormat.SPARSE)
+    ds_msgs = run(OutputFormat.DENSE)
+
+    assert len(sp_msgs) == len(ds_msgs)
+    for sp_msg, ds_msg in zip(sp_msgs, ds_msgs):
+        assert isinstance(sp_msg.data, sparse.SparseArray)
+        assert not isinstance(ds_msg.data, sparse.SparseArray)
+        assert sp_msg.data.shape == ds_msg.data.shape
+        assert ds_msg.data.dtype == (in_dat.dtype if return_peak_val else np.bool_)
+        np.testing.assert_array_equal(sp_msg.data.todense(), ds_msg.data)
+        assert sp_msg.axes["time"].offset == ds_msg.axes["time"].offset
+        assert sp_msg.axes["time"].gain == ds_msg.axes["time"].gain
 
 
 @pytest.mark.parametrize("return_peak_val", [False, True])

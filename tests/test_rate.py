@@ -1,11 +1,14 @@
 import time
 
 import numpy as np
+import pytest
 import sparse
 from conftest import CHUNK_LEN, FS, N_CH, make_sparse_event_msg
 from ezmsg.util.messages.axisarray import AxisArray
 
+from ezmsg.event.peak import OutputFormat, ThresholdCrossingTransformer
 from ezmsg.event.rate import EventRateSettings, Rate
+from ezmsg.event.util.simulate import generate_white_noise_with_events
 
 
 def test_event_rate_composite():
@@ -77,6 +80,81 @@ def test_rate_empty_time_after_init():
     out2 = proc(msg2)
     assert out2.data.ndim == 2
     assert out2.data.shape[1] == N_CH
+
+
+def _make_msg(arr: np.ndarray, fs: float, offset: float) -> AxisArray:
+    return AxisArray(
+        data=arr,
+        dims=["time", "ch"],
+        axes={
+            "time": AxisArray.TimeAxis(fs=fs, offset=offset),
+            "ch": AxisArray.CoordinateAxis(data=np.arange(arr.shape[1]), dims=["ch"]),
+        },
+    )
+
+
+def _run_threshold_rate(
+    arr_chunks, *, fs: float, threshold: float, refrac_dur: float, bin_duration: float, output_format: OutputFormat
+) -> list[AxisArray]:
+    thresh = ThresholdCrossingTransformer(
+        threshold=threshold,
+        refrac_dur=refrac_dur,
+        output_format=output_format,
+    )
+    rate = Rate(EventRateSettings(bin_duration=bin_duration))
+    out, samp_off = [], 0
+    for chunk in arr_chunks:
+        out.append(rate(thresh(_make_msg(chunk, fs, samp_off / fs))))
+        samp_off += chunk.shape[0]
+    return out
+
+
+@pytest.mark.parametrize(
+    ("fs", "bin_duration", "refrac_dur"),
+    [
+        (1000.0, 0.010, 0.006),  # integer samples per bin
+        (30012.0048, 0.020, 0.001),  # fractional samples per bin
+    ],
+)
+def test_rate_dense_input_matches_sparse(fs: float, bin_duration: float, refrac_dur: float):
+    """Rate fed dense ThresholdCrossing output must match the sparse pipeline bin-for-bin."""
+    threshold = 2.5
+    rate_range = (1, 100)
+    n_chans = 8
+    dur = 0.6
+
+    chunk_lens = [int(fs * 0.05), int(fs * 0.13), int(fs * 0.21)]
+    chunk_lens.append(int(fs * dur) - sum(chunk_lens))
+    in_dat = generate_white_noise_with_events(fs, dur, n_chans, rate_range, 0.05, threshold)
+
+    chunks, idx = [], 0
+    for cl in chunk_lens:
+        chunks.append(in_dat[idx : idx + cl])
+        idx += cl
+
+    sp = _run_threshold_rate(
+        chunks,
+        fs=fs,
+        threshold=threshold,
+        refrac_dur=refrac_dur,
+        bin_duration=bin_duration,
+        output_format=OutputFormat.SPARSE,
+    )
+    ds = _run_threshold_rate(
+        chunks,
+        fs=fs,
+        threshold=threshold,
+        refrac_dur=refrac_dur,
+        bin_duration=bin_duration,
+        output_format=OutputFormat.DENSE,
+    )
+
+    assert len(sp) == len(ds)
+    for sp_msg, ds_msg in zip(sp, ds):
+        assert sp_msg.data.shape == ds_msg.data.shape
+        assert sp_msg.axes["time"].gain == ds_msg.axes["time"].gain
+        assert np.isclose(sp_msg.axes["time"].offset, ds_msg.axes["time"].offset)
+        np.testing.assert_allclose(sp_msg.data, ds_msg.data)
 
 
 def test_rate_empty_time_first():
