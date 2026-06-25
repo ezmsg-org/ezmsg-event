@@ -72,9 +72,13 @@ class BinnedEventAggregator(BaseTransformer[BinnedEventAggregatorSettings, AxisA
             data = data.todense()
         xp = get_namespace(data)
         # Per-sample contribution: the event value, or 1 per nonzero entry.
-        # float64 where available (exact integer counts; matches the legacy
-        # output dtype); float32 otherwise (e.g. MLX, which has no float64).
-        float_dtype = xp.float64 if hasattr(xp, "float64") else xp.float32
+        # float64 where usable (exact integer counts; matches the legacy output
+        # dtype); float32 otherwise. MLX *exposes* ``mx.float64`` as an attribute
+        # but the GPU rejects it ("float64 is not supported on the GPU"), so
+        # ``hasattr(xp, "float64")`` is not a sufficient capability check --
+        # detect the MLX namespace explicitly and fall back to float32.
+        is_mlx = getattr(xp, "__name__", "") == "mlx.core"
+        float_dtype = xp.float64 if (hasattr(xp, "float64") and not is_mlx) else xp.float32
         contrib = data if self.settings.scale_by_value else (data != 0)
         contrib = contrib.astype(float_dtype)
 
