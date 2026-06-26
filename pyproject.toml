@@ -10,7 +10,7 @@ dynamic = ["version"]
 dependencies = [
     "ezmsg>=3.9.0",
     "ezmsg-baseproc>=1.10.2",
-    "ezmsg-sigproc>=2.26.0",
+    "ezmsg-sigproc>=2.26.1",
     "sparse>=0.17.0",
     "numpy>=2.2.6",
 ]
