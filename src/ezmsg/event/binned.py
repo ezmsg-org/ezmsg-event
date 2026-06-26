@@ -1,21 +1,23 @@
 """Bin an event stream into a lower-rate count (or rate) signal.
 
-The binning itself is delegated to
-:obj:`ezmsg.sigproc.binned_aggregate.BinnedAggregate` so the spike-rate branch
-shares a *single* bin-boundary implementation with the spike-band-power branch
-(``Pow -> BinnedAggregate(MEAN)``). With ``fractional=True`` (the default) bins
-span a fractional ``bin_duration * fs`` samples with a carry accumulator, track
-wall-clock time, and are labelled with the nominal ``bin_duration`` gain --
-identical to how :obj:`ezmsg.event.rate.EventRate` is consumed downstream. That
-makes the two branches land on the same grid at any input rate (including the
-off-nominal ~30012 Hz of real recordings), so a downstream ``Merge`` aligns them
-with no post-hoc reconciler.
+The binning is delegated to
+:obj:`ezmsg.sigproc.binned_aggregate.BinnedAggregate` so this shares one
+bin-boundary implementation with every other consumer of that binner. With
+``fractional=True`` (the default) bins span a fractional ``bin_duration * fs``
+samples with a carry accumulator and are labelled with the nominal
+``bin_duration`` gain; with ``fractional=False`` they span a fixed
+``int(bin_duration * fs)`` samples (sample-locked, matching
+:obj:`ezmsg.sigproc.window.Window`). Because the grid comes from the shared
+binner, two streams binned this way at the same ``bin_duration`` land on the
+same grid for any input rate and can be aligned downstream (e.g. with
+``ezmsg.sigproc.merge.Merge``).
 
-Sparse ``sparse.COO`` inputs (the default ``ThresholdCrossing`` output) are
-densified to per-sample contributions before binning; dense inputs are used as
-is. Set ``scale_by_value=True`` to weight each event by its stored value instead
-of counting occurrences, and ``scale_output=True`` to divide the per-bin count
-by ``bin_duration`` (events/second).
+Sparse ``sparse.COO`` inputs (e.g. the default
+:obj:`ezmsg.event.peak.ThresholdCrossing` output) are densified to per-sample
+contributions before binning; dense inputs are used as is. Set
+``scale_by_value=True`` to weight each event by its stored value instead of
+counting occurrences, and ``scale_output=True`` to divide the per-bin count by
+``bin_duration`` (events/second).
 """
 
 import ezmsg.core as ez
@@ -38,9 +40,10 @@ class BinnedEventAggregatorSettings(ez.Settings):
     """Name of the axis to bin along."""
 
     fractional: bool = True
-    """If True (default), share ``EventRate``'s fractional wall-clock grid via
-    :obj:`BinnedAggregate` (nominal ``bin_duration`` gain). If False, use a fixed
-    ``int(bin_duration * fs)`` sample-locked grid. See :obj:`BinnedAggregate`."""
+    """If True (default), bins span a fractional ``bin_duration * fs`` samples via
+    :obj:`BinnedAggregate` and are labelled with the nominal ``bin_duration``
+    gain. If False, bins span a fixed ``int(bin_duration * fs)`` samples
+    (sample-locked). See :obj:`BinnedAggregate`."""
 
     scale_by_value: bool = False
     """If True, weight each event by its stored value; if False (default), every

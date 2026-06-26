@@ -54,7 +54,7 @@ def test_eventrate_and_dense_binner_share_grid(fs: float, block_size: int):
         samp_off += chunk.shape[0]
 
     # Per-message: identical gain + offset on every non-empty output, and matching
-    # bin counts. This is exactly what a downstream Merge(align_axis="time") needs.
+    # bin counts -- enough to align two streams binned at the same bin_duration.
     for r, b in zip(rate_out, binner_out):
         assert r.data.shape[0] == b.data.shape[0]
         if r.data.shape[0] == 0:

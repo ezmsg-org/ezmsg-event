@@ -109,10 +109,10 @@ def _run(proc, msgs):
 
 @pytest.mark.parametrize("fs", [30_000.0, 30_012.0, 30_030.0])
 def test_fractional_grid_offnominal(fs: float):
-    """At an off-nominal rate the fractional binner stays on the nominal-gain
-    wall-clock grid (gain == bin_duration, n_bins == int(n / (bin_duration*fs))),
-    which is what aligns it with the spike-band-power branch. The legacy
-    sample-locked path (Window) would instead report gain int(bin*fs)/fs."""
+    """At an off-nominal rate the fractional binner stays on the nominal-gain grid
+    (gain == bin_duration, n_bins == int(n / (bin_duration*fs))). The sample-locked
+    path (fractional=False, matching Window) would instead report gain
+    int(bin*fs)/fs."""
     bin_dur = 0.02
     n = 300_000
     spk = (np.random.default_rng(0).random((n, N_CH)) < 0.01).astype(float)

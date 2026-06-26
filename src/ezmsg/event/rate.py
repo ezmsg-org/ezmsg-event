@@ -17,8 +17,7 @@ class EventRateSettings(ez.Settings):
     """If True (default), bins span a fractional ``bin_duration * fs`` samples and
     the output rate is exactly ``1 / bin_duration``. If False, bins are
     sample-locked to ``int(bin_duration * fs)`` samples (output rate
-    ``fs / int(bin_duration * fs)``), matching :obj:`ezmsg.sigproc.window.Window`
-    so a sample-locked SBP branch and the spike-rate branch share one grid."""
+    ``fs / int(bin_duration * fs)``), matching :obj:`ezmsg.sigproc.window.Window`."""
 
 
 class Rate(BinnedKernelActivation):
