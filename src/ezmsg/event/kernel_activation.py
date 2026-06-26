@@ -23,6 +23,7 @@ import numpy.typing as npt
 import sparse
 from array_api_compat import get_namespace, is_numpy_array
 from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state
+from ezmsg.sigproc.util.binning import BinSchedule
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 
@@ -96,8 +97,10 @@ class BinnedKernelActivationState:
     # Input sample rate (cached from first message)
     fs: float | None = None
 
-    # Accumulated fractional bin samples for proper bin alignment
-    bin_accumulator: float = 0.0
+    # Shared bin-boundary schedule. Owns samples-per-bin, the fractional carry,
+    # the global bin index, and the output gain/offset -- the same primitive the
+    # ezmsg-sigproc dense binner uses, so both land on an identical grid.
+    schedule: BinSchedule | None = None
 
 
 class BinnedKernelActivation(
@@ -141,7 +144,6 @@ class BinnedKernelActivation(
 
         self._state.activation = np.zeros(n_channels, dtype=np.float64)
         self._state.samples_since_update = np.zeros(n_channels, dtype=np.int64)
-        self._state.bin_accumulator = 0.0
 
         # For alpha kernel, we need auxiliary state
         if self.settings.kernel_type == ActivationKernelType.ALPHA:
@@ -151,6 +153,11 @@ class BinnedKernelActivation(
         time_axis = message.axes["time"]
         if time_axis.gain > 0:
             self._state.fs = 1.0 / time_axis.gain
+
+        # EventRate's binning is always fractional (bins track the nominal
+        # bin_duration). The schedule owns the boundary arithmetic from here on.
+        self._state.schedule = BinSchedule(bin_duration=self.settings.bin_duration, fractional=True)
+        self._state.schedule.reset(self._state.fs)
 
     def _decay_to_sample(self, channel: int, target_sample: int) -> None:
         """
@@ -238,16 +245,16 @@ class BinnedKernelActivation(
         n_samples = sparse_data.shape[0]
         n_channels = sparse_data.shape[1] if sparse_data.ndim > 1 else 1
 
-        # Calculate bin parameters
-        samples_per_bin = self.settings.bin_duration * self._state.fs
-        total_samples = n_samples + self._state.bin_accumulator
-        n_bins = int(total_samples / samples_per_bin)
+        # Boundary arithmetic is delegated to the shared schedule (samples-per-bin,
+        # fractional carry, global bin index, output gain/offset).
+        in_offset = message.axes["time"].offset if "time" in message.axes else 0.0
+        n_carry_before = self._state.schedule.carry_count
+        step = self._state.schedule.advance(n_new=n_samples, in_offset=in_offset, gain_in=1.0 / self._state.fs)
+        n_bins = step.n_bins
 
         if n_bins == 0:
-            # Not enough samples for a full bin yet
-            self._state.bin_accumulator = total_samples
-
-            # Still need to process events to update state
+            # Not enough samples for a full bin yet (the schedule has folded these
+            # samples into its carry). Still process events to update state.
             if hasattr(sparse_data, "coords") and hasattr(sparse_data, "data"):
                 coords = sparse_data.coords
                 values = sparse_data.data
@@ -263,18 +270,15 @@ class BinnedKernelActivation(
                 data=np.zeros((0, n_channels), dtype=np.float64),
                 axes={
                     **message.axes,
-                    "time": replace(message.axes["time"], gain=self.settings.bin_duration),
+                    "time": replace(message.axes["time"], gain=step.output_gain),
                 },
             )
 
-        # Calculate bin boundaries (in input samples, relative to chunk start)
-        # Account for accumulator from previous chunk
-        accumulator_before = self._state.bin_accumulator  # Save for offset calculation
-        first_bin_end = samples_per_bin - self._state.bin_accumulator
-        bin_ends = first_bin_end + np.arange(n_bins) * samples_per_bin
-
-        # Update accumulator for next chunk
-        self._state.bin_accumulator = total_samples - n_bins * samples_per_bin
+        # Bin ends in input samples relative to *this chunk's* start. The schedule
+        # returns cut points into [carry ++ new]; subtracting the pre-advance carry
+        # count maps them back to chunk-local indices (identical to the legacy
+        # `(spb - acc) + arange*spb` truncated formula).
+        bin_ends = np.asarray(step.cut_points, dtype=np.int64) - n_carry_before
 
         # Collect events sorted by time
         events = []
@@ -366,12 +370,6 @@ class BinnedKernelActivation(
         if self.settings.rate_normalize:
             output = output / self.settings.bin_duration
 
-        # Calculate output time offset
-        # The first bin starts at (input_offset - accumulator_time)
-        input_offset = message.axes["time"].offset if "time" in message.axes else 0.0
-        accumulator_time = accumulator_before / self._state.fs
-        output_offset = input_offset - accumulator_time
-
         return replace(
             message,
             data=output,
@@ -379,7 +377,7 @@ class BinnedKernelActivation(
                 **message.axes,
                 "time": AxisArray.TimeAxis(
                     fs=1.0 / self.settings.bin_duration,
-                    offset=output_offset,
+                    offset=step.output_offset,
                 ),
             },
         )
@@ -397,10 +395,10 @@ class BinnedKernelActivation(
         n_samples = data.shape[0]
         feature_shape = tuple(data.shape[1:])
 
-        samples_per_bin = self.settings.bin_duration * self._state.fs
-        accumulator_before = self._state.bin_accumulator
-        total_samples = n_samples + accumulator_before
-        n_bins = int(total_samples / samples_per_bin)
+        in_offset = message.axes["time"].offset if "time" in message.axes else 0.0
+        n_carry_before = self._state.schedule.carry_count
+        step = self._state.schedule.advance(n_new=n_samples, in_offset=in_offset, gain_in=1.0 / self._state.fs)
+        n_bins = step.n_bins
 
         # Per-sample contribution: 1 per non-zero, or the value itself if scaling.
         # Use the .astype() method form so the same call works for both numpy and mlx
@@ -419,20 +417,18 @@ class BinnedKernelActivation(
             # No complete bins this chunk — accumulate everything into the carry-over.
             new_overflow = overflow_xp + (xp.sum(contrib, axis=0) if n_samples > 0 else overflow_xp * 0)
             self._state.activation = np.asarray(new_overflow).reshape(self._state.activation.shape)
-            self._state.bin_accumulator = total_samples
             return replace(
                 message,
                 data=xp.zeros((0,) + feature_shape, dtype=xp.float32),
                 axes={
                     **message.axes,
-                    "time": replace(message.axes["time"], gain=self.settings.bin_duration),
+                    "time": replace(message.axes["time"], gain=step.output_gain),
                 },
             )
 
-        # Bin boundaries (in input-sample space, integer-truncated as in the event-based path).
-        first_bin_end = samples_per_bin - accumulator_before
-        bin_ends_float = first_bin_end + np.arange(n_bins) * samples_per_bin
-        bin_end_samples = bin_ends_float.astype(np.int64)
+        # Bin boundaries in this chunk's sample space, from the shared schedule
+        # (cut points into [carry ++ new] mapped back to chunk-local indices).
+        bin_end_samples = np.asarray(step.cut_points, dtype=np.int64) - n_carry_before
         bin_start_samples = np.concatenate(([np.int64(0)], bin_end_samples[:-1]))
 
         # Cumulative sum, prepended with zeros so cumsum_padded[k] = sum(contrib[:k]).
@@ -462,14 +458,11 @@ class BinnedKernelActivation(
         else:
             new_overflow = xp.zeros(feature_shape, dtype=cumsum.dtype)
         self._state.activation = np.asarray(new_overflow).reshape(self._state.activation.shape)
-        self._state.bin_accumulator = total_samples - n_bins * samples_per_bin
 
         if self.settings.rate_normalize:
             output = output / self.settings.bin_duration
 
-        accumulator_time = accumulator_before / self._state.fs
-        input_offset = message.axes["time"].offset if "time" in message.axes else 0.0
-        output_offset = input_offset - accumulator_time
+        output_offset = step.output_offset
 
         return replace(
             message,
