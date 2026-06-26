@@ -13,6 +13,13 @@ from ezmsg.event.kernel_activation import (
 class EventRateSettings(ez.Settings):
     bin_duration: float = 0.05
 
+    fractional: bool = True
+    """If True (default), bins span a fractional ``bin_duration * fs`` samples and
+    the output rate is exactly ``1 / bin_duration``. If False, bins are
+    sample-locked to ``int(bin_duration * fs)`` samples (output rate
+    ``fs / int(bin_duration * fs)``), matching :obj:`ezmsg.sigproc.window.Window`
+    so a sample-locked SBP branch and the spike-rate branch share one grid."""
+
 
 class Rate(BinnedKernelActivation):
     """
@@ -31,6 +38,7 @@ class Rate(BinnedKernelActivation):
                 scale_by_value=False,
                 normalize=False,
                 rate_normalize=True,
+                fractional=settings.fractional,
             )
         )
 

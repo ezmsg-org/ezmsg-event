@@ -78,7 +78,16 @@ class BinnedKernelActivationSettings(ez.Settings):
     """If True, normalize kernel so integral equals 1."""
 
     rate_normalize: bool = False
-    """If True, divide output by bin_duration to get events/second (for COUNT kernel)."""
+    """If True, divide output by the bin's duration to get events/second (for COUNT
+    kernel). The divisor is the *actual* bin duration (``samples_per_bin / fs``),
+    which equals ``bin_duration`` exactly in fractional mode."""
+
+    fractional: bool = True
+    """If True (default), bins span a *fractional* ``bin_duration * fs`` samples
+    with a carry accumulator; bins track the nominal duration and the output gain
+    is exactly ``bin_duration``. If False, bins span a *fixed* ``int(bin_duration *
+    fs)`` samples and the output gain is ``int(bin_duration * fs) / fs``
+    (sample-locked, matching :obj:`ezmsg.sigproc.window.Window`)."""
 
 
 @processor_state
@@ -154,9 +163,9 @@ class BinnedKernelActivation(
         if time_axis.gain > 0:
             self._state.fs = 1.0 / time_axis.gain
 
-        # EventRate's binning is always fractional (bins track the nominal
-        # bin_duration). The schedule owns the boundary arithmetic from here on.
-        self._state.schedule = BinSchedule(bin_duration=self.settings.bin_duration, fractional=True)
+        # The schedule owns the boundary arithmetic from here on; fractional mode
+        # tracks the nominal bin_duration, sample-locked mode matches Window's grid.
+        self._state.schedule = BinSchedule(bin_duration=self.settings.bin_duration, fractional=self.settings.fractional)
         self._state.schedule.reset(self._state.fs)
 
     def _decay_to_sample(self, channel: int, target_sample: int) -> None:
@@ -366,9 +375,10 @@ class BinnedKernelActivation(
         # Update state sample counters relative to next chunk
         self._state.samples_since_update -= n_samples
 
-        # Apply rate normalization if requested (divide by bin_duration to get events/second)
+        # Apply rate normalization if requested (divide by the bin's actual
+        # duration to get events/second; == bin_duration in fractional mode).
         if self.settings.rate_normalize:
-            output = output / self.settings.bin_duration
+            output = output / step.output_gain
 
         return replace(
             message,
@@ -376,7 +386,7 @@ class BinnedKernelActivation(
             axes={
                 **message.axes,
                 "time": AxisArray.TimeAxis(
-                    fs=1.0 / self.settings.bin_duration,
+                    fs=1.0 / step.output_gain,
                     offset=step.output_offset,
                 ),
             },
@@ -460,9 +470,7 @@ class BinnedKernelActivation(
         self._state.activation = np.asarray(new_overflow).reshape(self._state.activation.shape)
 
         if self.settings.rate_normalize:
-            output = output / self.settings.bin_duration
-
-        output_offset = step.output_offset
+            output = output / step.output_gain
 
         return replace(
             message,
@@ -470,8 +478,8 @@ class BinnedKernelActivation(
             axes={
                 **message.axes,
                 "time": AxisArray.TimeAxis(
-                    fs=1.0 / self.settings.bin_duration,
-                    offset=output_offset,
+                    fs=1.0 / step.output_gain,
+                    offset=step.output_offset,
                 ),
             },
         )
