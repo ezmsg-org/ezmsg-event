@@ -96,21 +96,3 @@ class BinnedEventAggregatorUnit(
     BaseTransformerUnit[BinnedEventAggregatorSettings, AxisArray, AxisArray, BinnedEventAggregator]
 ):
     SETTINGS = BinnedEventAggregatorSettings
-
-
-def binned_event_aggregator(
-    bin_duration: float = 0.05,
-    scale_output: bool = True,
-    axis: str = "time",
-    fractional: bool = True,
-    scale_by_value: bool = False,
-) -> BinnedEventAggregator:
-    return BinnedEventAggregator(
-        BinnedEventAggregatorSettings(
-            bin_duration=bin_duration,
-            scale_output=scale_output,
-            axis=axis,
-            fractional=fractional,
-            scale_by_value=scale_by_value,
-        )
-    )
