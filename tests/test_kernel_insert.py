@@ -80,6 +80,19 @@ class TestSparseKernelInserterBasics:
         assert result.data[5, 0] == 3.0
         assert result.data[10, 0] == 5.0
 
+    def test_scale_by_value_with_kernel(self):
+        """scale_by_value scales a non-impulse kernel's amplitude by the value."""
+        kernel_data = np.array([1.0, 2.0, 3.0])
+        inserter = SparseKernelInserter(
+            SparseKernelInserterSettings(kernel=ArrayKernel(kernel_data), scale_by_value=True)
+        )
+
+        message = make_sparse_message(coords=[(5, 0)], values=[4], shape=(20, 1))
+        result = inserter(message)
+
+        # Kernel scaled by the event value (4): [1, 2, 3] -> [4, 8, 12]
+        np.testing.assert_array_almost_equal(result.data[5:8, 0], [4.0, 8.0, 12.0])
+
     def test_simple_kernel_insertion(self):
         """Insert simple kernel at event location."""
         kernel_data = np.array([1.0, 2.0, 3.0, 2.0, 1.0])
@@ -222,6 +235,53 @@ class TestSparseKernelInserterMultiKernel:
         assert result.data[10, 0] == 2.0
         assert result.data[11, 0] == 2.0
         assert result.data[12, 0] == 2.0
+
+    def test_unknown_value_falls_back_to_default(self):
+        """An event value not in the MultiKernel uses the default kernel.
+
+        Mirrors ``MultiKernel.get``: with no explicit default_key the first
+        inserted key (1 -> k1) is the fallback, so value 99 gets k1.
+        """
+        k1 = ArrayKernel(np.array([1.0, 1.0, 1.0]))
+        k2 = ArrayKernel(np.array([2.0, 2.0, 2.0]))
+        multi = MultiKernel({1: k1, 2: k2})
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(kernel=multi))
+
+        message = make_sparse_message(coords=[(5, 0)], values=[99], shape=(20, 1))
+        result = inserter(message)
+
+        # Unknown value 99 -> default (first key, k1 = all 1s)
+        np.testing.assert_array_almost_equal(result.data[5:8, 0], [1.0, 1.0, 1.0])
+        assert np.sum(result.data) == 3.0
+
+    def test_explicit_default_key(self):
+        """default_key selects which kernel handles unknown values."""
+        k1 = ArrayKernel(np.array([1.0, 1.0, 1.0]))
+        k2 = ArrayKernel(np.array([2.0, 2.0, 2.0]))
+        multi = MultiKernel({1: k1, 2: k2}, default_key=2)
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(kernel=multi))
+
+        message = make_sparse_message(coords=[(5, 0)], values=[99], shape=(20, 1))
+        result = inserter(message)
+
+        # Unknown value 99 -> explicit default_key=2 (k2 = all 2s)
+        np.testing.assert_array_almost_equal(result.data[5:8, 0], [2.0, 2.0, 2.0])
+
+    def test_scale_by_value_with_multikernel(self):
+        """scale_by_value scales the selected kernel's amplitude by the value,
+        while the (integer) value still selects the kernel."""
+        k1 = ArrayKernel(np.array([1.0, 1.0, 1.0]))
+        k2 = ArrayKernel(np.array([2.0, 2.0, 2.0]))
+        multi = MultiKernel({1: k1, 2: k2})
+        inserter = SparseKernelInserter(SparseKernelInserterSettings(kernel=multi, scale_by_value=True))
+
+        message = make_sparse_message(coords=[(0, 0), (10, 0)], values=[1, 2], shape=(20, 1))
+        result = inserter(message)
+
+        # value 1 -> k1 scaled by 1 == [1, 1, 1]
+        np.testing.assert_array_almost_equal(result.data[0:3, 0], [1.0, 1.0, 1.0])
+        # value 2 -> k2 scaled by 2 == [4, 4, 4]
+        np.testing.assert_array_almost_equal(result.data[10:13, 0], [4.0, 4.0, 4.0])
 
 
 class TestSparseKernelInserterAcausal:

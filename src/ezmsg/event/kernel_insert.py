@@ -6,12 +6,62 @@ kernel waveforms at event locations. Overlapping kernels are summed.
 """
 
 import ezmsg.core as ez
+import numba
 import numpy as np
 import numpy.typing as npt
 from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 from .kernel import Kernel, MultiKernel
+
+
+@numba.jit(nopython=True, cache=True)
+def _insert_kernels_loop(
+    output: np.ndarray,  # (n_samples, n_channels), accumulated in place
+    pending: np.ndarray,  # (max_overlap, n_channels), accumulated in place
+    event_samples: np.ndarray,  # (n_events,) int64 sample index of each event
+    event_channels: np.ndarray,  # (n_events,) int64 channel index of each event
+    event_rows: np.ndarray,  # (n_events,) int64 kernel-table row for each event
+    event_scales: np.ndarray,  # (n_events,) float64 amplitude scale per event
+    kernel_table: np.ndarray,  # (n_rows, max_len) float64 sampled kernels (zero-padded)
+    kernel_lengths: np.ndarray,  # (n_rows,) int64 valid length of each kernel row
+    kernel_pres: np.ndarray,  # (n_rows,) int64 pre_samples of each kernel row
+    n_samples: int,
+    max_overlap: int,
+) -> int:
+    """Scatter pre-sampled kernels onto a dense buffer at event locations.
+
+    Compiled port of the per-event Python loop that used to live in
+    :meth:`SparseKernelInserter._process`. Each kernel is materialized once into
+    ``kernel_table`` (one zero-padded row per distinct kernel), so the only
+    per-event work here is an indexed add. Output sample ``base + j`` (where
+    ``base = sample - pre``) receives ``kernel_table[row, j] * scale``; samples
+    that fall past the end of this chunk spill into ``pending`` for the next one.
+
+    Returns the new ``pending_length`` (max filled index + 1, 0 if none).
+    """
+    pending_length = 0
+    n_events = event_samples.shape[0]
+    for e in range(n_events):
+        ch = event_channels[e]
+        row = event_rows[e]
+        scale = event_scales[e]
+        length = kernel_lengths[row]
+        base = event_samples[e] - kernel_pres[row]
+
+        for j in range(length):
+            out_idx = base + j
+            if out_idx < 0:
+                continue
+            if out_idx < n_samples:
+                output[out_idx, ch] += kernel_table[row, j] * scale
+            else:
+                p = out_idx - n_samples
+                if p < max_overlap:
+                    pending[p, ch] += kernel_table[row, j] * scale
+                    if p + 1 > pending_length:
+                        pending_length = p + 1
+    return pending_length
 
 
 class SparseKernelInserterSettings(ez.Settings):
@@ -45,6 +95,18 @@ class SparseKernelInserterState:
 
     # Number of pending samples (may be less than pending.shape[0] if reused)
     pending_length: int = 0
+
+    # Pre-sampled kernels: one zero-padded row per distinct kernel, with each
+    # row's valid length and pre_samples. Built once in _reset_state so the
+    # hot loop only does indexed adds (see _insert_kernels_loop).
+    kernel_table: npt.NDArray[np.float64] | None = None
+    kernel_lengths: npt.NDArray[np.int64] | None = None
+    kernel_pres: npt.NDArray[np.int64] | None = None
+
+    # Map event value -> kernel_table row, with a fallback row for values not
+    # present (mirrors MultiKernel.get's default-key behavior).
+    value_to_row: dict | None = None
+    default_row: int = 0
 
 
 class SparseKernelInserter(
@@ -92,6 +154,50 @@ class SparseKernelInserter(
         else:
             return kernel.pre_samples
 
+    def _build_kernel_table(self) -> None:
+        """Pre-sample every kernel into a zero-padded table (built once).
+
+        Each distinct kernel becomes one row, sampled at integer offsets so the
+        compiled loop can place it with a plain indexed add: row ``j`` holds the
+        kernel value that lands at output index ``(event_sample - pre) + j``.
+        ``value_to_row`` maps an event value to its row, mirroring
+        ``MultiKernel.get`` (unknown values fall back to ``default_row``).
+        """
+        kernel = self.settings.kernel
+
+        def sample(k: Kernel) -> npt.NDArray[np.float64]:
+            t = np.arange(k.length) - k.pre_samples
+            return np.asarray(k.evaluate(t), dtype=np.float64)
+
+        if kernel is None:
+            # Unit impulse: a length-1 kernel of [1.0] at the event sample.
+            kernels = [np.ones(1, dtype=np.float64)]
+            pres = [0]
+            value_to_row: dict = {}
+            default_row = 0
+        elif isinstance(kernel, MultiKernel):
+            keys = list(kernel.keys)
+            kernels = [sample(kernel[k]) for k in keys]
+            pres = [kernel[k].pre_samples for k in keys]
+            value_to_row = {int(k): i for i, k in enumerate(keys)}
+            default_row = value_to_row[int(kernel._default_key)]
+        else:
+            kernels = [sample(kernel)]
+            pres = [kernel.pre_samples]
+            value_to_row = {}
+            default_row = 0
+
+        max_len = max(len(k) for k in kernels)
+        table = np.zeros((len(kernels), max_len), dtype=np.float64)
+        for i, k in enumerate(kernels):
+            table[i, : len(k)] = k
+
+        self._state.kernel_table = table
+        self._state.kernel_lengths = np.array([len(k) for k in kernels], dtype=np.int64)
+        self._state.kernel_pres = np.array(pres, dtype=np.int64)
+        self._state.value_to_row = value_to_row
+        self._state.default_row = default_row
+
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
         n_channels = message.data.shape[1] if message.data.ndim > 1 else 1
@@ -104,6 +210,7 @@ class SparseKernelInserter(
         else:
             self._state.pending = None
         self._state.pending_length = 0
+        self._build_kernel_table()
 
     def _get_kernel_for_value(self, value: int | float) -> tuple[Kernel | None, float]:
         """
@@ -149,63 +256,58 @@ class SparseKernelInserter(
             self._state.pending_length = 0
 
         # Process each event
-        if hasattr(sparse_data, "coords") and hasattr(sparse_data, "data"):
+        if hasattr(sparse_data, "coords") and hasattr(sparse_data, "data") and len(sparse_data.data) > 0:
             # sparse.COO format
             coords = sparse_data.coords
             values = sparse_data.data
 
-            for event_idx in range(len(values)):
-                sample_idx = int(coords[0, event_idx])
-                channel_idx = int(coords[1, event_idx]) if coords.shape[0] > 1 else 0
-                value = values[event_idx]
+            event_samples = np.ascontiguousarray(coords[0], dtype=np.int64)
+            if coords.shape[0] > 1:
+                event_channels = np.ascontiguousarray(coords[1], dtype=np.int64)
+            else:
+                event_channels = np.zeros(len(values), dtype=np.int64)
 
-                kernel, scale = self._get_kernel_for_value(value)
+            # Resolve each event value to a kernel-table row (vectorized over the
+            # typically-small set of distinct values), and its amplitude scale.
+            int_values = values.astype(np.int64)
+            uniq, inv = np.unique(int_values, return_inverse=True)
+            value_to_row = self._state.value_to_row
+            default_row = self._state.default_row
+            uniq_rows = np.array(
+                [value_to_row.get(int(v), default_row) for v in uniq],
+                dtype=np.int64,
+            )
+            event_rows = uniq_rows[inv]
 
-                if kernel is None:
-                    # Unit impulse
-                    if 0 <= sample_idx < n_samples:
-                        output[sample_idx, channel_idx] += scale
-                else:
-                    # Insert kernel
-                    pre = kernel.pre_samples
-                    length = kernel.length
+            if self.settings.scale_by_value:
+                event_scales = values.astype(np.float64)
+            else:
+                event_scales = np.ones(len(values), dtype=np.float64)
 
-                    # Calculate kernel placement range
-                    kernel_start = sample_idx - pre
-                    kernel_end = kernel_start + length
+            # numba needs a real array even when there is no pending buffer.
+            pending = self._state.pending
+            if pending is not None:
+                pending_buf = pending
+                max_overlap = pending.shape[0]
+            else:
+                pending_buf = np.zeros((0, n_channels), dtype=self.settings.output_dtype)
+                max_overlap = 0
 
-                    # Portion within current chunk
-                    chunk_start = max(0, kernel_start)
-                    chunk_end = min(n_samples, kernel_end)
-
-                    if chunk_start < chunk_end:
-                        # Kernel indices for this portion
-                        k_start = chunk_start - kernel_start
-                        k_end = k_start + (chunk_end - chunk_start)
-
-                        # Get kernel values
-                        t = np.arange(k_start, k_end, dtype=np.float64) - pre
-                        kernel_values = kernel.evaluate(t) * scale
-
-                        output[chunk_start:chunk_end, channel_idx] += kernel_values
-
-                    # Portion that extends into next chunk (pending)
-                    if kernel_end > n_samples and self._state.pending is not None:
-                        pending_start = max(0, n_samples - kernel_start)
-                        pending_end = length
-                        pending_samples = pending_end - pending_start
-
-                        if pending_samples > 0:
-                            # Kernel indices for pending portion
-                            t = np.arange(pending_start, pending_end, dtype=np.float64) - pre
-                            kernel_values = kernel.evaluate(t) * scale
-
-                            # Add to pending buffer
-                            self._state.pending[:pending_samples, channel_idx] += kernel_values
-                            self._state.pending_length = max(
-                                self._state.pending_length,
-                                pending_samples,
-                            )
+            pending_length = _insert_kernels_loop(
+                output,
+                pending_buf,
+                event_samples,
+                event_channels,
+                event_rows,
+                event_scales,
+                self._state.kernel_table,
+                self._state.kernel_lengths,
+                self._state.kernel_pres,
+                n_samples,
+                max_overlap,
+            )
+            if pending is not None:
+                self._state.pending_length = max(self._state.pending_length, pending_length)
 
         # Create output message
         return replace(message, data=output)
