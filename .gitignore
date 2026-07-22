@@ -165,3 +165,4 @@ src/ezmsg/event/__version__.py
 uv.lock
 *.local.json
 docs/source/api/generated/
+.codegraph/
