@@ -154,7 +154,7 @@ class ThresholdCrossingTransformer(
             self._state.elapsed = np.full((n_features,), self._state.refrac_width + 1, dtype=np.int32)
 
     def _can_use_mlx_metal(self, xp, data) -> bool:
-        """The Metal kernel runs automatically for MLX + DENSE + a config it supports.
+        """The Metal kernel runs automatically for MLX + dense + a supported config.
 
         It cannot recover peak values, align on peaks, enforce a min peak width, or
         auto-scale, so any of those settings disable the path.
@@ -253,6 +253,12 @@ class ThresholdCrossingTransformer(
         # (the cpu path's prepended buffer alone yields no new crossings, and the metal
         # kernel has nothing to scan). Short-circuit before backend dispatch.
         if message.data.shape[0] == 0:
+            # _hash_message ignores the sample count, so an empty first chunk still triggers
+            # _reset_state, which seeds _state.data from data[:1] -> an empty time axis. Force
+            # a re-reset so the first non-empty chunk seeds the prev-sample reference (the
+            # metal path indexes _state.data[0], and the cpu path prepends it).
+            if self._state.data is not None and self._state.data.shape[0] == 0:
+                self._request_reset()
             return self._empty_output(message, xp)
 
         # MLX-on-device fast path: bypass the numpy event-detection logic and run

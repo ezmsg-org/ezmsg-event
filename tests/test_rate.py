@@ -157,6 +157,36 @@ def test_rate_dense_input_matches_sparse(fs: float, bin_duration: float, refrac_
         np.testing.assert_allclose(sp_msg.data, ds_msg.data)
 
 
+def test_rate_dense_threshold_preserves_mlx_backend():
+    mx = pytest.importorskip("mlx.core")
+    try:
+        mx.eval(mx.array([1.0], dtype=mx.float32))
+    except RuntimeError as exc:
+        pytest.skip(f"MLX device unavailable: {exc}")
+
+    fs = 30_000.0
+    data = np.zeros((600, 4), dtype=np.float32)
+    data[10] = -2.0
+    data[310] = -2.0
+    message = _make_msg(mx.array(data), fs, 0.0)
+
+    threshold = ThresholdCrossingTransformer(
+        threshold=-1.0,
+        refrac_dur=0.001,
+        output_format=OutputFormat.DENSE,
+    )
+    rate = Rate(EventRateSettings(bin_duration=0.02, fractional=False))
+
+    events = threshold(message)
+    result = rate(events)
+    mx.eval(events.data, result.data)
+
+    assert isinstance(events.data, mx.array)
+    assert isinstance(result.data, mx.array)
+    assert isinstance(rate.state.dense_carry, mx.array)
+    np.testing.assert_allclose(np.asarray(result.data), np.full((1, 4), 100.0))
+
+
 def test_rate_empty_time_first():
     """Empty → normal: empty first message triggers _reset_state on empty data."""
     proc = Rate(EventRateSettings(bin_duration=0.02))

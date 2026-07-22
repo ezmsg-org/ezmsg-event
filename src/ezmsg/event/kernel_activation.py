@@ -6,13 +6,13 @@ at a lower output rate than the input. For exponential and alpha kernels,
 uses a state-based approach that is O(n_events + n_bins) instead of
 O(n_samples).
 
-Input may be either ``sparse.COO`` (the typical output of
-:class:`ezmsg.event.peak.ThresholdCrossingTransformer` in default mode) or a
-dense array (from the same transformer with ``output_format=DENSE``). When the
-input is dense and the configuration is COUNT + SUM (the rate-computation
-case), the binning runs on the input's array namespace and stays on device
-(e.g., MLX, CuPy). Other configurations with dense input fall back to
-event-extraction and use the same code path as sparse input.
+Input may be either ``sparse.COO`` (the default output of
+:class:`ezmsg.event.peak.ThresholdCrossingTransformer`) or a dense array from the
+same transformer with ``output_format=DENSE``. When the input is dense and the
+configuration is COUNT + SUM (the rate-computation case), the binning runs on the
+input's array namespace and stays on device (e.g., MLX, CuPy). Other configurations
+with dense input fall back to event extraction and use the same code path as sparse
+input.
 """
 
 from enum import Enum
@@ -97,6 +97,9 @@ class BinnedKernelActivationState:
     # Current activation level per channel (for exponential/alpha)
     activation: npt.NDArray[np.float64] | None = None
 
+    dense_carry: object | None = None
+    """Partial-bin COUNT+SUM state in the dense input's array namespace."""
+
     # For alpha kernel: auxiliary state variable
     alpha_aux: npt.NDArray[np.float64] | None = None
 
@@ -145,13 +148,15 @@ class BinnedKernelActivation(
         if "time" not in message.axes or not hasattr(message.axes["time"], "gain"):
             raise ValueError("Could not determine sample rate from input message")
         # str(dtype) works for numpy ('bool', 'float32', ...) and mlx (which doesn't expose dtype.kind).
-        return hash((message.data.ndim, str(message.data.dtype), n_channels, message.axes["time"].gain))
+        backend = "sparse" if isinstance(message.data, sparse.SparseArray) else get_namespace(message.data).__name__
+        return hash((message.data.ndim, str(message.data.dtype), n_channels, message.axes["time"].gain, backend))
 
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
         n_channels = message.data.shape[message.get_axis_idx("ch")] if "ch" in message.dims else 1
 
         self._state.activation = np.zeros(n_channels, dtype=np.float64)
+        self._state.dense_carry = None
         self._state.samples_since_update = np.zeros(n_channels, dtype=np.int64)
 
         # For alpha kernel, we need auxiliary state
@@ -420,13 +425,17 @@ class BinnedKernelActivation(
         else:
             contrib = (data != 0).astype(xp.float32)
 
-        # Pull state into the input namespace for on-device math.
-        overflow_xp = xp.asarray(self._state.activation.reshape(feature_shape)).astype(xp.float32)
+        # Keep dense partial-bin state in the input namespace. In particular, do
+        # not round-trip an MLX carry through np.asarray here: that synchronizes
+        # the device on every source chunk, including chunks that close no bin.
+        overflow_xp = (
+            xp.zeros(feature_shape, dtype=xp.float32) if self._state.dense_carry is None else self._state.dense_carry
+        )
 
         if n_bins == 0:
             # No complete bins this chunk — accumulate everything into the carry-over.
             new_overflow = overflow_xp + (xp.sum(contrib, axis=0) if n_samples > 0 else overflow_xp * 0)
-            self._state.activation = np.asarray(new_overflow).reshape(self._state.activation.shape)
+            self._state.dense_carry = new_overflow
             return replace(
                 message,
                 data=xp.zeros((0,) + feature_shape, dtype=xp.float32),
@@ -467,7 +476,7 @@ class BinnedKernelActivation(
             new_overflow = xp.sum(contrib[last_bin_end:], axis=0)
         else:
             new_overflow = xp.zeros(feature_shape, dtype=cumsum.dtype)
-        self._state.activation = np.asarray(new_overflow).reshape(self._state.activation.shape)
+        self._state.dense_carry = new_overflow
 
         if self.settings.rate_normalize:
             output = output / step.output_gain

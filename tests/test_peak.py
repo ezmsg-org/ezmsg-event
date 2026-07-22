@@ -183,6 +183,33 @@ def _require_mlx():
     return mx
 
 
+def test_threshold_crossing_defaults_to_sparse():
+    proc = ThresholdCrossingTransformer(ThresholdSettings(threshold=-1.0, refrac_dur=0.0))
+    msg = AxisArray(
+        data=np.zeros((10, 2), dtype=np.float32),
+        dims=["time", "ch"],
+        axes={"time": AxisArray.TimeAxis(fs=1000.0)},
+    )
+
+    result = proc(msg)
+
+    assert isinstance(result.data, sparse.SparseArray)
+
+
+def test_threshold_crossing_mlx_defaults_to_sparse():
+    mx = _require_mlx()
+    proc = ThresholdCrossingTransformer(ThresholdSettings(threshold=-1.0, refrac_dur=0.0))
+    msg = AxisArray(
+        data=mx.zeros((10, 2), dtype=mx.float32),
+        dims=["time", "ch"],
+        axes={"time": AxisArray.TimeAxis(fs=1000.0)},
+    )
+
+    result = proc(msg)
+
+    assert isinstance(result.data, sparse.SparseArray)
+
+
 @pytest.mark.parametrize(
     ("threshold", "refrac_dur", "stride"),
     [
@@ -292,3 +319,33 @@ def test_threshold_crossing_empty_time_first(return_peak_val: bool, auto_scale_t
     out_normal = proc(msg_normal)
     assert isinstance(out_normal.data, sparse.SparseArray)
     assert out_normal.data.shape[1] == N_CH
+
+
+def test_threshold_crossing_empty_time_first_mlx_metal():
+    """Empty → normal for MLX inputs: the empty first chunk must not leave the Metal path with
+    an empty prev-sample reference (regression for `[take] ... from an empty axis`)."""
+    mx = _require_mlx()
+    fs = 1000.0
+
+    proc = ThresholdCrossingTransformer(
+        ThresholdSettings(
+            threshold=-1.0,
+            refrac_dur=0.001,
+            output_format=OutputFormat.DENSE,
+        )
+    )
+
+    def mlx_msg(n_time: int) -> AxisArray:
+        return AxisArray(
+            data=mx.array(np.random.randn(n_time, N_CH).astype(np.float32)),
+            dims=["time", "ch"],
+            axes={"time": AxisArray.TimeAxis(fs=fs)},
+        )
+
+    out_empty = proc(mlx_msg(0))
+    assert out_empty.data.shape[0] == 0
+
+    out_normal = proc(mlx_msg(64))
+    mx.eval(out_normal.data)
+    assert not isinstance(out_normal.data, sparse.SparseArray)
+    assert out_normal.data.shape == (64, N_CH)
