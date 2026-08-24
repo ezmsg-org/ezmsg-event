@@ -400,10 +400,11 @@ class BinnedKernelActivation(
     def _process_dense_count_sum(self, message: AxisArray) -> AxisArray:
         """Fast path: dense input + COUNT kernel + SUM aggregation.
 
-        Bins are summed using cumulative-sum arithmetic in the input's array
-        namespace, so accelerator-resident inputs (MLX, CuPy) stay on device.
+        Bins are summed in the input's array namespace, so accelerator-resident
+        inputs (MLX, CuPy) stay on device. Uniform completed bins use direct
+        reshape reductions; irregular fractional bins use cumulative sums.
         Carry-over for the partial bin spanning chunk boundaries is held in
-        ``state.activation`` (numpy) and shuttled across boundaries.
+        ``state.dense_carry`` in the active array namespace.
         """
         xp = get_namespace(message.data)
         data = message.data
@@ -450,32 +451,64 @@ class BinnedKernelActivation(
         bin_end_samples = np.asarray(step.cut_points, dtype=np.int64) - n_carry_before
         bin_start_samples = np.concatenate(([np.int64(0)], bin_end_samples[:-1]))
 
-        # Cumulative sum, prepended with zeros so cumsum_padded[k] = sum(contrib[:k]).
-        # Use cumsum (in both numpy and mlx); numpy via array_api_compat also exposes
-        # the standard `cumulative_sum`, but mlx does not.
-        cumsum = xp.cumsum(contrib, axis=0)
-        zero_row = xp.zeros((1,) + feature_shape, dtype=cumsum.dtype)
-        cumsum_padded = xp.concat((zero_row, cumsum), axis=0)
+        last_bin_end = int(bin_end_samples[-1])
+        bin_widths_after_first = np.diff(bin_end_samples)
+        uniform_complete_bins = n_bins == 1 or np.all(bin_widths_after_first == bin_widths_after_first[0])
+        # For a stream of sub-bin chunks, the occasional call that closes only
+        # the carried bin is faster through the existing cumsum path. Direct
+        # reduction pays off for a carry-free bin or when it can amortise setup
+        # across multiple completed bins.
+        use_direct_reduction = uniform_complete_bins and (n_carry_before == 0 or n_bins > 1)
 
-        end_idx = xp.asarray(bin_end_samples)
-        start_idx = xp.asarray(bin_start_samples)
-        bin_sums = xp.take(cumsum_padded, end_idx, axis=0) - xp.take(cumsum_padded, start_idx, axis=0)
-
-        # Add carry-over from the previous chunk's partial bin into bin 0.
-        overflow_pad_first = overflow_xp[None, ...]
-        if n_bins > 1:
-            overflow_pad_rest = xp.zeros((n_bins - 1,) + feature_shape, dtype=bin_sums.dtype)
-            overflow_pad = xp.concat((overflow_pad_first, overflow_pad_rest), axis=0)
+        if use_direct_reduction:
+            # The first bin may complete a partial bin carried from the previous
+            # chunk. Every later bin is wholly inside this chunk; when those bin
+            # widths are uniform, reshape + reduction avoids materialising a
+            # full-size cumulative-sum array and two gather-index arrays.
+            first_bin_end = int(bin_end_samples[0])
+            first_bin_sum = overflow_xp + (
+                xp.sum(contrib[:first_bin_end], axis=0)
+                if first_bin_end > 0
+                else xp.zeros(feature_shape, dtype=xp.float32)
+            )
+            if n_bins == 1:
+                output = first_bin_sum[None, ...]
+            else:
+                bin_width = int(bin_widths_after_first[0])
+                complete = xp.reshape(
+                    contrib[first_bin_end:last_bin_end],
+                    (n_bins - 1, bin_width) + feature_shape,
+                )
+                later_bin_sums = xp.sum(complete, axis=1)
+                output = xp.concat((first_bin_sum[None, ...], later_bin_sums), axis=0)
         else:
-            overflow_pad = overflow_pad_first
-        output = bin_sums + overflow_pad
+            # Fractional schedules can produce nonuniform interior bin widths;
+            # this path also handles the cheaper single carried-bin completion.
+            # Cumulative sums handle arbitrary cut points without a Python loop.
+            # Use cumsum (in both numpy and mlx); numpy via array_api_compat also
+            # exposes `cumulative_sum`, but mlx does not.
+            cumsum = xp.cumsum(contrib, axis=0)
+            zero_row = xp.zeros((1,) + feature_shape, dtype=cumsum.dtype)
+            cumsum_padded = xp.concat((zero_row, cumsum), axis=0)
+
+            end_idx = xp.asarray(bin_end_samples)
+            start_idx = xp.asarray(bin_start_samples)
+            bin_sums = xp.take(cumsum_padded, end_idx, axis=0) - xp.take(cumsum_padded, start_idx, axis=0)
+
+            # Add carry-over from the previous chunk's partial bin into bin 0.
+            overflow_pad_first = overflow_xp[None, ...]
+            if n_bins > 1:
+                overflow_pad_rest = xp.zeros((n_bins - 1,) + feature_shape, dtype=bin_sums.dtype)
+                overflow_pad = xp.concat((overflow_pad_first, overflow_pad_rest), axis=0)
+            else:
+                overflow_pad = overflow_pad_first
+            output = bin_sums + overflow_pad
 
         # New carry-over: events past the last complete bin remain in the partial bin.
-        last_bin_end = int(bin_end_samples[-1])
         if last_bin_end < n_samples:
             new_overflow = xp.sum(contrib[last_bin_end:], axis=0)
         else:
-            new_overflow = xp.zeros(feature_shape, dtype=cumsum.dtype)
+            new_overflow = xp.zeros(feature_shape, dtype=contrib.dtype)
         self._state.dense_carry = new_overflow
 
         if self.settings.rate_normalize:

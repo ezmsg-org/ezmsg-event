@@ -73,15 +73,14 @@ def threshold_crossings_mlx_metal(
     elapsed_flat = elapsed.astype(mx.int32).reshape(n_channels)
     n_words = (n_samples + 31) // 32
 
+    # Keep values that vary by stream or chunk out of Metal templates. The
+    # kernels obtain dimensions from generated shape metadata and receive the
+    # remaining values here, so jittered chunk lengths reuse one compilation.
     params = mx.array([float(threshold)], dtype=mx.float32)
+    metadata = mx.array([n_samples, refrac_width], dtype=mx.int32)
 
     crossing_words, last_sample = _crossing_words_kernel(
         inputs=[x_flat, prev_sample_flat, params],
-        template=[
-            ("N_SAMPLES", n_samples),
-            ("N_CHANNELS", n_channels),
-            ("N_WORDS", n_words),
-        ],
         grid=(n_words, n_channels, 1),
         threadgroup=(1, 1, 1),
         output_shapes=[(n_words, n_channels), (n_channels,)],
@@ -89,13 +88,7 @@ def threshold_crossings_mlx_metal(
     )
 
     events_flat, elapsed_out = _refractory_dense_kernel(
-        inputs=[crossing_words, elapsed_flat],
-        template=[
-            ("N_SAMPLES", n_samples),
-            ("N_CHANNELS", n_channels),
-            ("N_WORDS", n_words),
-            ("REFRAC_WIDTH", refrac_width),
-        ],
+        inputs=[crossing_words, elapsed_flat, metadata],
         grid=(n_channels, 1, 1),
         threadgroup=(1, 1, 1),
         output_shapes=[(n_samples, n_channels), (n_channels,)],
@@ -113,77 +106,80 @@ def threshold_crossings_mlx_metal(
 _CROSSING_WORDS_KERNEL_SOURCE = r"""
     uint word = thread_position_in_grid.x;
     uint ch = thread_position_in_grid.y;
-    if (word >= N_WORDS || ch >= N_CHANNELS) {
+    uint n_samples = x_in_shape[0];
+    uint n_channels = x_in_shape[1];
+    uint n_words = (n_samples + 31) / 32;
+    if (word >= n_words || ch >= n_channels) {
         return;
     }
 
     float threshold = params[0];
     uint start = word * 32;
-    float ref_sample = start == 0 ? prev_sample_in[ch] : x_in[(start - 1) * N_CHANNELS + ch];
+    float ref_sample = start == 0 ? prev_sample_in[ch] : x_in[(start - 1) * n_channels + ch];
     uint prev = threshold >= 0.0f ? (ref_sample >= threshold) : (ref_sample <= threshold);
 
     uint bits = 0;
     for (uint bit = 0; bit < 32; ++bit) {
         uint t = start + bit;
-        if (t >= N_SAMPLES) {
+        if (t >= n_samples) {
             break;
         }
 
-        float sample = x_in[t * N_CHANNELS + ch];
+        float sample = x_in[t * n_channels + ch];
         uint over = threshold >= 0.0f ? (sample >= threshold) : (sample <= threshold);
         if (over && !prev) {
             bits |= (1u << bit);
         }
         prev = over;
     }
-    crossing_words_out[word * N_CHANNELS + ch] = bits;
+    crossing_words_out[word * n_channels + ch] = bits;
 
-    if (word == N_WORDS - 1) {
-        last_sample_out[ch] = x_in[(N_SAMPLES - 1) * N_CHANNELS + ch];
+    if (word == n_words - 1) {
+        last_sample_out[ch] = x_in[(n_samples - 1) * n_channels + ch];
     }
 """
 
 
 _REFRACTORY_DENSE_KERNEL_SOURCE = r"""
     uint ch = thread_position_in_grid.x;
-    if (ch >= N_CHANNELS) {
+    uint n_words = crossing_words_in_shape[0];
+    uint n_channels = crossing_words_in_shape[1];
+    uint n_samples = metadata[0];
+    int refrac_width = metadata[1];
+    if (ch >= n_channels) {
         return;
     }
 
-    for (uint t = 0; t < N_SAMPLES; ++t) {
-        events_out[t * N_CHANNELS + ch] = 0;
+    for (uint t = 0; t < n_samples; ++t) {
+        events_out[t * n_channels + ch] = 0;
     }
 
     int elapsed = elapsed_in[ch];
     int last_t = -1;
 
-    for (uint word = 0; word < N_WORDS; ++word) {
-        uint bits = crossing_words_in[word * N_CHANNELS + ch];
+    for (uint word = 0; word < n_words; ++word) {
+        uint bits = crossing_words_in[word * n_channels + ch];
         while (bits != 0) {
-            uint bit = 0;
-            uint mask = 1u;
-            while ((bits & mask) == 0u) {
-                bit += 1;
-                mask <<= 1;
-            }
-            bits &= ~mask;
+            // Locate and clear the least-significant crossing in constant time.
+            uint bit = ctz(bits);
+            bits &= bits - 1;
 
             uint t = word * 32 + bit;
-            if (t >= N_SAMPLES) {
+            if (t >= n_samples) {
                 break;
             }
 
             elapsed += int(t) - last_t;
             last_t = int(t);
 
-            if (REFRAC_WIDTH <= 2 || elapsed > REFRAC_WIDTH) {
-                events_out[t * N_CHANNELS + ch] = 1;
+            if (refrac_width <= 2 || elapsed > refrac_width) {
+                events_out[t * n_channels + ch] = 1;
                 elapsed = 0;
             }
         }
     }
 
-    elapsed += int(N_SAMPLES) - 1 - last_t;
+    elapsed += int(n_samples) - 1 - last_t;
     elapsed_out[ch] = elapsed;
 """
 
@@ -198,7 +194,7 @@ _crossing_words_kernel = mx.fast.metal_kernel(
 
 _refractory_dense_kernel = mx.fast.metal_kernel(
     name="threshold_refractory_dense",
-    input_names=["crossing_words_in", "elapsed_in"],
+    input_names=["crossing_words_in", "elapsed_in", "metadata"],
     output_names=["events_out", "elapsed_out"],
     source=_REFRACTORY_DENSE_KERNEL_SOURCE,
 )
