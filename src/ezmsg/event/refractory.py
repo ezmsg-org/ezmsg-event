@@ -20,9 +20,6 @@ class Refractory:
 
 
 class RefractoryTransformer(BaseStatefulTransformer[RefractorySettings, AxisArray, AxisArray, Refractory]):
-    def _hash_message(self, message: AxisArray) -> int:
-        return super()._hash_message(message)
-
     def _reset_state(self, message: AxisArray) -> None:
         fs = 1 / message.axes["time"].gain
         self._state.width = int(self.settings.dur * fs)

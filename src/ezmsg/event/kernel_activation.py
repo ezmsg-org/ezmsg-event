@@ -144,12 +144,19 @@ class BinnedKernelActivation(
     """
 
     def _hash_message(self, message: AxisArray) -> int:
-        n_channels = message.data.shape[message.get_axis_idx("ch")] if "ch" in message.dims else 1
         if "time" not in message.axes or not hasattr(message.axes["time"], "gain"):
             raise ValueError("Could not determine sample rate from input message")
-        # str(dtype) works for numpy ('bool', 'float32', ...) and mlx (which doesn't expose dtype.kind).
+        # The base class covers the key, the dims, the channel count and the
+        # sample rate. Two things it cannot see are added here:
+        #   dtype   -- `str()` rather than `.kind`, which mlx arrays do not expose.
+        #   backend -- the per-channel state is numpy either way, but the code
+        #              paths that fill it differ between sparse, numpy and mlx.
+        # Folding in the key is new, and is the point: `activation`,
+        # `dense_carry` and `samples_since_update` are per-channel running state,
+        # so carrying them into a different stream is the same failure as a
+        # filter keeping the previous device's history.
         backend = "sparse" if isinstance(message.data, sparse.SparseArray) else get_namespace(message.data).__name__
-        return hash((message.data.ndim, str(message.data.dtype), n_channels, message.axes["time"].gain, backend))
+        return self._message_hash(message, extra=(str(message.data.dtype), backend))
 
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
