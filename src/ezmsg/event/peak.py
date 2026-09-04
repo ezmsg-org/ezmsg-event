@@ -106,11 +106,6 @@ class ThresholdCrossingTransformer(
 ):
     """Transformer that detects threshold crossing events."""
 
-    def _hash_message(self, message: AxisArray) -> int:
-        ax_idx = message.get_axis_idx("time")
-        sample_shape = message.data.shape[:ax_idx] + message.data.shape[ax_idx + 1 :]
-        return hash((message.key, sample_shape, message.axes["time"].gain))
-
     def _reset_state(self, message: AxisArray) -> None:
         """Reset the state variables."""
         xp = get_namespace(message.data)
