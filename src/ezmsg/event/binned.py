@@ -23,7 +23,12 @@ counting occurrences, and ``scale_output=True`` to divide the per-bin count by
 import ezmsg.core as ez
 import sparse
 from array_api_compat import get_namespace
-from ezmsg.baseproc import BaseTransformer, BaseTransformerUnit
+from ezmsg.baseproc import (
+    BaseTransformer,
+    BaseTransformerUnit,
+    suppress_axis_deprecation,
+    warn_axis_deprecated,
+)
 from ezmsg.sigproc.aggregate import AggregationFunction
 from ezmsg.sigproc.binned_aggregate import BinnedAggregateSettings, BinnedAggregateTransformer
 from ezmsg.util.messages.axisarray import AxisArray, replace
@@ -36,8 +41,15 @@ class BinnedEventAggregatorSettings(ez.Settings):
     scale_output: bool = True
     """If True, divide each bin's count by ``bin_duration`` (events/second)."""
 
-    axis: str = "time"
-    """Name of the axis to bin along."""
+    axis: str | None = None
+    """.. deprecated:: 1.4
+        Scheduled for removal in 2.0. Binning carries an open partial bin across
+        message boundaries, which is only meaningful along the dimension messages
+        accumulate along; that dimension now comes from
+        :attr:`~ezmsg.util.messages.axisarray.AxisArray.chunk_dim`."""
+
+    def __post_init__(self) -> None:
+        warn_axis_deprecated(self, package="ezmsg-event", removal="2.0")
 
     fractional: bool = True
     """If True (default), bins span a fractional ``bin_duration * fs`` samples via
@@ -60,14 +72,17 @@ class BinnedEventAggregator(BaseTransformer[BinnedEventAggregatorSettings, AxisA
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._binner = BinnedAggregateTransformer(
-            BinnedAggregateSettings(
-                axis=self.settings.axis,
-                bin_duration=self.settings.bin_duration,
-                operation=AggregationFunction.SUM,
-                fractional=self.settings.fractional,
+        # Forwarding this stage's own already-warned setting; warning again would
+        # name a sigproc class for something the user set on ours.
+        with suppress_axis_deprecation():
+            self._binner = BinnedAggregateTransformer(
+                BinnedAggregateSettings(
+                    axis=self.settings.axis,
+                    bin_duration=self.settings.bin_duration,
+                    operation=AggregationFunction.SUM,
+                    fractional=self.settings.fractional,
+                )
             )
-        )
 
     def _process(self, message: AxisArray) -> AxisArray:
         data = message.data

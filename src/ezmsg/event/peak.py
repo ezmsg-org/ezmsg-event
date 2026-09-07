@@ -23,6 +23,7 @@ from ezmsg.baseproc import (
     BaseStatefulTransformer,
     BaseTransformerUnit,
     processor_state,
+    suppress_axis_deprecation,
 )
 from ezmsg.sigproc.scaler import AdaptiveStandardScalerTransformer
 from ezmsg.util.messages.axisarray import AxisArray, replace  # slice_along_axis,
@@ -126,9 +127,15 @@ class ThresholdCrossingTransformer(
         self._state.scaler = None
         self._state.data_raw = None
         if self.settings.auto_scale_tau > 0:
-            self._state.scaler = AdaptiveStandardScalerTransformer(
-                time_constant=self.settings.auto_scale_tau, axis="time"
-            )
+            # This module works on "time" throughout (see get_axis_idx calls
+            # below), so the scaler has to as well -- they share the state that
+            # normalises the samples being thresholded. Suppressed rather than
+            # dropped for that reason: letting the scaler follow chunk_dim while
+            # everything around it used "time" would be worse than either.
+            with suppress_axis_deprecation():
+                self._state.scaler = AdaptiveStandardScalerTransformer(
+                    time_constant=self.settings.auto_scale_tau, axis="time"
+                )
             if self.settings.return_peak_val:
                 self._state.data_raw = first_samp
 
