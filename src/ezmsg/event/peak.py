@@ -23,9 +23,9 @@ from ezmsg.baseproc import (
     BaseStatefulTransformer,
     BaseTransformerUnit,
     processor_state,
-    suppress_axis_deprecation,
 )
 from ezmsg.sigproc.scaler import AdaptiveStandardScalerTransformer
+from ezmsg.sigproc.util.deprecation import suppress_axis_deprecation
 from ezmsg.util.messages.axisarray import AxisArray, replace  # slice_along_axis,
 
 

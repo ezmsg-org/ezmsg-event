@@ -26,11 +26,16 @@ from array_api_compat import get_namespace
 from ezmsg.baseproc import (
     BaseTransformer,
     BaseTransformerUnit,
-    suppress_axis_deprecation,
     warn_axis_deprecated,
 )
 from ezmsg.sigproc.aggregate import AggregationFunction
 from ezmsg.sigproc.binned_aggregate import BinnedAggregateSettings, BinnedAggregateTransformer
+
+# Suppression has to come from whichever module raises the warning, and
+# ezmsg-sigproc 3.8.0 shipped its own copy of the mechanism before it moved
+# to ezmsg-baseproc. Later versions re-export baseproc's, so this import is
+# the one that works against both.
+from ezmsg.sigproc.util.deprecation import suppress_axis_deprecation
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 
