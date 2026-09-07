@@ -1,4 +1,5 @@
 import time
+import warnings
 
 import numpy as np
 import pytest
@@ -220,3 +221,61 @@ def test_fractional_false_sample_locked(fs: float):
     spb = int(bin_dur * fs)
     assert sum(m.data.shape[0] for m in out) == n // spb
     assert out[0].axes["time"].gain == pytest.approx(spb / fs)
+
+
+class TestTheAxisSettingIsDeprecated:
+    """``axis`` is going away in 2.0: binning carries an open partial bin across
+    message boundaries, which is only meaningful along the dimension messages
+    accumulate along. That dimension comes from ``AxisArray.chunk_dim``."""
+
+    @staticmethod
+    def _msg(n=64, fs=200.0):
+        data = np.zeros((n, 2))
+        data[::8] = 1.0
+        return AxisArray(
+            data,
+            dims=["time", "ch"],
+            axes={"time": AxisArray.TimeAxis(fs=fs)},
+            key="dev",
+            chunk_dim="time",
+        )
+
+    @staticmethod
+    def _axis_warnings(records):
+        return [r for r in records if issubclass(r.category, FutureWarning) and "deprecated" in str(r.message)]
+
+    def test_setting_it_warns_about_our_class_not_sigprocs(self):
+        """The user set it on ``BinnedEventAggregatorSettings``; naming the
+        sigproc class we delegate to would send them looking in the wrong place."""
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            BinnedEventAggregatorSettings(bin_duration=0.02, axis="time")
+        (record,) = self._axis_warnings(rec)
+        assert "BinnedEventAggregatorSettings.axis" in str(record.message)
+
+    def test_leaving_it_unset_is_silent_through_processing(self):
+        """The delegation to BinnedAggregate forwards our setting, so without
+        suppression every use would warn about a class the user never touched."""
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            proc = BinnedEventAggregator(BinnedEventAggregatorSettings(bin_duration=0.02))
+            proc(self._msg())
+            proc(self._msg())
+        assert not self._axis_warnings(rec)
+
+    def test_forwarding_our_own_setting_warns_only_once(self):
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            proc = BinnedEventAggregator(BinnedEventAggregatorSettings(bin_duration=0.02, axis="time"))
+            proc(self._msg())
+        assert len(self._axis_warnings(rec)) == 1
+
+    def test_it_still_bins_along_a_configured_axis(self):
+        """Behaviour is unchanged until removal."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            explicit = BinnedEventAggregator(BinnedEventAggregatorSettings(bin_duration=0.02, axis="time"))
+            implicit = BinnedEventAggregator(BinnedEventAggregatorSettings(bin_duration=0.02))
+            a = explicit(self._msg())
+            b = implicit(self._msg())
+        assert np.array_equal(a.data, b.data)

@@ -13,8 +13,8 @@ dependencies = [
     # left to the transitive requirement: uv only enables pre-releases for a
     # package named with a pre-release marker in *this* file.
     "ezmsg>=3.10.0b2",
-    "ezmsg-baseproc>=1.12.0",
-    "ezmsg-sigproc>=2.26.1",
+    "ezmsg-baseproc>=1.13.0",
+    "ezmsg-sigproc>=3.8.0",  # BinnedAggregate must resolve chunk_dim from axis=None
     "sparse>=0.17.0",
     "numpy>=2.2.6",
     "numba>=0.65.1",
