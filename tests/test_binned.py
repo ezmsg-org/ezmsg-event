@@ -226,7 +226,7 @@ def test_fractional_false_sample_locked(fs: float):
 class TestTheAxisSettingIsDeprecated:
     """``axis`` is going away in 2.0: binning carries an open partial bin across
     message boundaries, which is only meaningful along the dimension messages
-    accumulate along. That dimension comes from ``AxisArray.chunk_dim``."""
+    accumulate along. That dimension comes from ``AxisArray.stream_dim``."""
 
     @staticmethod
     def _msg(n=64, fs=200.0):
@@ -237,7 +237,7 @@ class TestTheAxisSettingIsDeprecated:
             dims=["time", "ch"],
             axes={"time": AxisArray.TimeAxis(fs=fs)},
             key="dev",
-            chunk_dim="time",
+            stream_dim="time",
         )
 
     @staticmethod

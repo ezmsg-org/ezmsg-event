@@ -130,7 +130,7 @@ class ThresholdCrossingTransformer(
             # This module works on "time" throughout (see get_axis_idx calls
             # below), so the scaler has to as well -- they share the state that
             # normalises the samples being thresholded. Suppressed rather than
-            # dropped for that reason: letting the scaler follow chunk_dim while
+            # dropped for that reason: letting the scaler follow stream_dim while
             # everything around it used "time" would be worse than either.
             with suppress_axis_deprecation():
                 self._state.scaler = AdaptiveStandardScalerTransformer(

@@ -50,7 +50,7 @@ def dense_msg(labels, n_time=600, fs=FS, key="dev", seed=0):
             "ch": CoordinateAxis(data=np.array(labels), dims=["ch"]),
         },
         key=key,
-        chunk_dim="time",
+        stream_dim="time",
     )
 
 
@@ -67,7 +67,7 @@ def sparse_msg(labels, n_time=600, fs=FS, key="dev", dtype=bool):
             "ch": CoordinateAxis(data=np.array(labels), dims=["ch"]),
         },
         key=key,
-        chunk_dim="time",
+        stream_dim="time",
     )
 
 
@@ -83,7 +83,7 @@ def at_sample(labels, sample_ix, n_time=600, fs=FS, key="dev"):
             "ch": CoordinateAxis(data=np.array(labels), dims=["ch"]),
         },
         key=key,
-        chunk_dim="time",
+        stream_dim="time",
     )
 
 
@@ -150,7 +150,7 @@ class TestARelabelIsNoticed:
 
 class TestWhatMustNotResetStillDoesNot:
     def test_chunk_size_jitter_is_ignored(self):
-        """The chunk dimension's length is whatever arrived; rebuilding on it
+        """The stream dimension's length is whatever arrived; rebuilding on it
         would throw away the trailing buffer on every irregular chunk."""
         proc = ThresholdCrossingTransformer(ThresholdSettings(threshold=-1.0))
         proc(dense_msg(ARM_A, n_time=600))
