@@ -46,7 +46,7 @@ class BinnedEventAggregatorSettings(ez.Settings):
         Scheduled for removal in 2.0. Binning carries an open partial bin across
         message boundaries, which is only meaningful along the dimension messages
         accumulate along; that dimension now comes from
-        :attr:`~ezmsg.util.messages.axisarray.AxisArray.chunk_dim`."""
+        :attr:`~ezmsg.util.messages.axisarray.AxisArray.stream_dim`."""
 
     def __post_init__(self) -> None:
         warn_axis_deprecated(self, package="ezmsg-event", removal="2.0")
