@@ -12,13 +12,23 @@ dependencies = [
     # ezmsg-baseproc's default state hash reads. Pinned directly rather than
     # left to the transitive requirement: uv only enables pre-releases for a
     # package named with a pre-release marker in *this* file.
-    "ezmsg>=3.10.0b3",
+    "ezmsg>=3.10.0b4",
     "ezmsg-baseproc>=1.13.0",
     "ezmsg-sigproc>=3.8.1",  # BinnedAggregate must resolve stream_dim from axis=None
     "sparse>=0.17.0",
     "numpy>=2.2.6",
     "numba>=0.65.1",
 ]
+
+
+[project.entry-points."ezmsg.components"]
+"event.BinnedEventAggregatorUnit" = "ezmsg.event.binned:BinnedEventAggregatorUnit"
+"event.BinnedKernelActivationUnit" = "ezmsg.event.kernel_activation:BinnedKernelActivationUnit"
+"event.EventRate" = "ezmsg.event.rate:EventRate"
+"event.PoissonEventUnit" = "ezmsg.event.poissonevents:PoissonEventUnit"
+"event.SparseKernelInserterUnit" = "ezmsg.event.kernel_insert:SparseKernelInserterUnit"
+"event.ThresholdCrossing" = "ezmsg.event.peak:ThresholdCrossing"
+
 
 [dependency-groups]
 dev = [
