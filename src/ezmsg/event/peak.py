@@ -155,6 +155,16 @@ class ThresholdCrossingTransformer(
             n_features = math.prod(feature_shape) if feature_shape else 1
             self._state.elapsed = np.full((n_features,), self._state.refrac_width + 1, dtype=np.int32)
 
+    def _reset_segment(self, message: AxisArray) -> None:
+        """A new segment drops the trailing samples and refractory counts, which belong to
+        the samples before the gap, but keeps the scaler: its running statistics describe
+        the signal, and a gap in time does not date them. The scaler sees the new segment
+        itself and applies its own rule (``reset_on_resume``)."""
+        scaler = self._state.scaler
+        self._reset_state(message)
+        if scaler is not None:
+            self._state.scaler = scaler
+
     def _can_use_mlx_metal(self, xp, data) -> bool:
         """The Metal kernel runs automatically for MLX + dense + a supported config.
 
