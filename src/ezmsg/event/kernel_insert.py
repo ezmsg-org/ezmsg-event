@@ -109,6 +109,15 @@ class SparseKernelInserterState:
     value_to_row: dict | None = None
     default_row: int = 0
 
+    template: AxisArray | None = None
+    """The output layout with no samples, taken at reset. `flush` labels the held tail from it."""
+
+    next_offset: float = 0.0
+    """Time offset just past the last input sample, where the held tail starts."""
+
+    last_attrs: dict | None = None
+    """The last input's attrs, which can change without a reset; `flush` gives them to the tail."""
+
     configs: ConfigChain | None = None
     """Derives the output's config_id (dense, ``output_dtype``) from the input's."""
 
@@ -220,6 +229,11 @@ class SparseKernelInserter(
         self._build_kernel_table()
         out_dtype = np.dtype(self.settings.output_dtype)
         self._state.configs = ConfigChain("numpy", out_dtype.name)
+        self._state.template = replace(
+            message,
+            data=np.zeros(tuple(0 if i == ax else n for i, n in enumerate(message.data.shape)), dtype=out_dtype),
+            config_id=self._state.configs.update(message.config_id),
+        )
 
     def _get_kernel_for_value(self, value: int | float) -> tuple[Kernel | None, float]:
         """
@@ -320,7 +334,36 @@ class SparseKernelInserter(
             if pending is not None:
                 self._state.pending_length = max(self._state.pending_length, pending_length)
 
+        time_axis = message.axes[axis]
+        self._state.next_offset = time_axis.offset + n_samples * time_axis.gain
+        self._state.last_attrs = message.attrs
         return replace(message, data=output, config_id=self._state.configs.update(message.config_id))
+
+    def flush(self, message: AxisArray | None = None) -> AxisArray | None:
+        """Process ``message`` if given, then emit the kernel tails that extend past the last sample.
+
+        The tail is ``pending_length`` samples starting just after the last input sample, labelled
+        with the old stream's segment and config_id. Returns None if no tail is held. The next
+        message starts afresh even if it continues the same segment.
+        """
+        out = None if message is None else self(message)
+        st = self._state
+        n = st.pending_length
+        if st.pending is None or n == 0:
+            return out
+        ax = st.template.get_axis_idx(st.axis)
+        tail = replace(
+            st.template,
+            data=st.pending[:n].copy() if ax == 0 else st.pending[:n].T.copy(),
+            axes={**st.template.axes, st.axis: replace(st.template.axes[st.axis], offset=st.next_offset)},
+            attrs=st.last_attrs,
+        )
+        st.pending[:] = 0
+        st.pending_length = 0
+        self._request_reset()
+        if out is None or out.data.shape[ax] == 0:
+            return tail
+        return replace(out, data=np.concatenate([out.data, tail.data], axis=ax))
 
 
 class SparseKernelInserterUnit(

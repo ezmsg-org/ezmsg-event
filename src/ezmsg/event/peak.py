@@ -118,6 +118,8 @@ class ThresholdCrossingTransformer(
     The output has the stream dimension first, whatever the input's layout.
     """
 
+    # No `flush`: an event still waiting for its look-ahead at a gap is dropped, like a partial window.
+
     def _reset_state(self, message: AxisArray) -> None:
         """Reset the state variables."""
         xp = get_namespace(message.data)

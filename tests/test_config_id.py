@@ -1,9 +1,12 @@
-"""The stream-metadata contract: ``config_id`` on every output, and empty messages.
+"""The stream-metadata contract: ``config_id`` on every output, empty messages, flushed tails.
 
 A stage whose output layout differs from its input (sparse events to dense bins, dense signal
 to sparse events, a new sample rate) stamps an id derived from the input's; a declared change of
-the input's id resets it; an empty message passes through.
+the input's id resets it; an empty message passes through; a kernel tail held at a segment break
+is flushed with the old stream's properties.
 """
+
+import asyncio
 
 import numpy as np
 import pytest
@@ -19,7 +22,11 @@ from ezmsg.event.kernel_activation import (
     BinnedKernelActivation,
     BinnedKernelActivationSettings,
 )
-from ezmsg.event.kernel_insert import SparseKernelInserter, SparseKernelInserterSettings
+from ezmsg.event.kernel_insert import (
+    SparseKernelInserter,
+    SparseKernelInserterSettings,
+    SparseKernelInserterUnit,
+)
 from ezmsg.event.peak import OutputFormat, ThresholdCrossingTransformer, ThresholdSettings
 from ezmsg.event.poissonevents import PoissonEventSettings, PoissonEventTransformer
 from ezmsg.event.rate import EventRateSettings, Rate
@@ -174,6 +181,29 @@ class TestKernelInserterTail:
         values = np.ones(coords.shape[1], dtype=int)
         return _declare(sparse.COO(coords, values, shape=(n, 2)), offset=offset, segment=segment)
 
+    def test_flush_emits_the_tail_with_the_old_stream_properties(self):
+        proc = self._proc()
+        msg = self._at(8)
+        out = proc(msg)
+        tail = proc.flush()
+        np.testing.assert_array_equal(out.data[8:, 0], [1.0, 2.0])
+        np.testing.assert_array_equal(tail.data[:, 0], [3.0, 4.0, 5.0])
+        assert (tail.segment, tail.config_id, tail.key) == (msg.segment, out.config_id, msg.key)
+        assert tail.axes["time"].offset == pytest.approx(0.010)
+        assert tail.axes["time"].gain == out.axes["time"].gain
+        assert tail.dims == out.dims and tail.data.dtype == out.data.dtype
+        assert proc.flush() is None
+
+    def test_flush_without_a_tail_returns_none(self):
+        proc = self._proc()
+        proc(self._at(2))
+        assert proc.flush() is None
+
+    def test_flush_with_a_final_message_appends_the_tail(self):
+        proc = self._proc()
+        out = proc.flush(self._at(8))
+        np.testing.assert_array_equal(out.data[8:, 0], [1.0, 2.0, 3.0, 4.0, 5.0])
+
     def test_short_and_empty_chunks_keep_the_tail(self):
         """A chunk shorter than the tail (here empty, then one sample) used to drop the rest."""
         proc = self._proc()
@@ -186,6 +216,19 @@ class TestKernelInserterTail:
         full = np.concatenate([o.data[:, 0] for o in outs])
         np.testing.assert_array_equal(full[8:13], [1.0, 2.0, 3.0, 4.0, 5.0])
         assert full.sum() == 15.0
+
+    def test_unit_publishes_the_tail_before_an_end_of_stream_marker(self):
+        unit = SparseKernelInserterUnit(SparseKernelInserterSettings(kernel=ArrayKernel(np.arange(1.0, 6.0))))
+        unit.create_processor()
+
+        async def drive(msg):
+            return [m async for _, m in unit.on_signal(msg)]
+
+        msg = self._at(8)
+        asyncio.run(drive(msg))
+        tail, at_marker = asyncio.run(drive(end_of_stream(msg)))
+        assert tail.segment == 0 and tail.data.shape == (3, 2)
+        assert at_marker.segment == 1 and at_marker.data.shape == (0, 2)
 
 
 def test_threshold_scaler_survives_an_end_of_stream_marker():

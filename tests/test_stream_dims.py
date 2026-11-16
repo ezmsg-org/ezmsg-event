@@ -117,6 +117,22 @@ def test_output_matches_the_conventional_layout(name, layout):
     assert out.axes[time_dim].offset == pytest.approx(ref.axes["time"].offset)
 
 
+@pytest.mark.parametrize("layout", ["transposed", "renamed"])
+@pytest.mark.parametrize("name", ["rate_dense", "kernel_insert"])
+def test_flushed_tail_matches_the_conventional_layout(name, layout):
+    make_proc, make_msg, keeps_layout = STAGES[name]
+    ref_proc, proc = make_proc(), make_proc()
+    ref_proc(make_msg("conventional"))
+    msg = make_msg(layout)
+    proc(msg)
+    ref, tail = ref_proc.flush(), proc.flush()
+
+    _check_layout(tail, msg, keeps_layout, layout)
+    np.testing.assert_array_equal(_conventional(tail, layout), _conventional(ref, "conventional"))
+    time_dim = LAYOUTS[layout][0]
+    assert tail.axes[time_dim].offset == pytest.approx(ref.axes["time"].offset)
+
+
 @pytest.mark.parametrize("layout", ["conventional", "transposed", "renamed"])
 def test_poisson_events_land_on_the_right_channel(layout):
     """Random, so compared by where the events fall: only channel 1 has a rate."""
