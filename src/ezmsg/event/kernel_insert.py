@@ -10,6 +10,7 @@ import numba
 import numpy as np
 import numpy.typing as npt
 from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state, resolve_stream_dim
+from ezmsg.sigproc.util.segment import ConfigChain
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 from .kernel import Kernel, MultiKernel
@@ -107,6 +108,9 @@ class SparseKernelInserterState:
     # present (mirrors MultiKernel.get's default-key behavior).
     value_to_row: dict | None = None
     default_row: int = 0
+
+    configs: ConfigChain | None = None
+    """Derives the output's config_id (dense, ``output_dtype``) from the input's."""
 
     axis: str = ""
     """The resolved stream dimension, fixed at reset so every later use agrees."""
@@ -214,6 +218,8 @@ class SparseKernelInserter(
             self._state.pending = None
         self._state.pending_length = 0
         self._build_kernel_table()
+        out_dtype = np.dtype(self.settings.output_dtype)
+        self._state.configs = ConfigChain("numpy", out_dtype.name)
 
     def _get_kernel_for_value(self, value: int | float) -> tuple[Kernel | None, float]:
         """
@@ -321,8 +327,7 @@ class SparseKernelInserter(
             if pending is not None:
                 self._state.pending_length = max(self._state.pending_length, pending_length)
 
-        # Create output message
-        return replace(message, data=output)
+        return replace(message, data=output, config_id=self._state.configs.update(message.config_id))
 
 
 class SparseKernelInserterUnit(

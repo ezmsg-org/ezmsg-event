@@ -25,6 +25,7 @@ import sparse
 from array_api_compat import get_namespace, is_numpy_array
 from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state, resolve_stream_dim
 from ezmsg.sigproc.util.binning import BinSchedule
+from ezmsg.sigproc.util.segment import ConfigChain
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 
@@ -116,6 +117,9 @@ class BinnedKernelActivationState:
     # ezmsg-sigproc dense binner uses, so both land on an identical grid.
     schedule: BinSchedule | None = None
 
+    configs: ConfigChain | None = None
+    """Derives the output's config_id (dense, binned) from the input's."""
+
     axis: str = ""
     """The resolved stream dimension, fixed at reset so every later use agrees."""
 
@@ -154,19 +158,6 @@ class BinnedKernelActivation(
         - Configurable bin aggregation (last, mean, sum, max)
     """
 
-    def _hash_message(self, message: AxisArray) -> int:
-        # The base class covers the key, the dims, the channel count and the
-        # sample rate. Two things it cannot see are added here:
-        #   dtype   -- `str()` rather than `.kind`, which mlx arrays do not expose.
-        #   backend -- the per-channel state is numpy either way, but the code
-        #              paths that fill it differ between sparse, numpy and mlx.
-        # Folding in the key is new, and is the point: `activation`,
-        # `dense_carry` and `samples_since_update` are per-channel running state,
-        # so carrying them into a different stream is the same failure as a
-        # filter keeping the previous device's history.
-        backend = "sparse" if isinstance(message.data, sparse.SparseArray) else get_namespace(message.data).__name__
-        return self._message_hash(message, extra=(str(message.data.dtype), backend))
-
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
         if self.settings.kernel_type == ActivationKernelType.COUNT and self.settings.aggregation == BinAggregation.MAX:
@@ -202,6 +193,16 @@ class BinnedKernelActivation(
         # tracks the nominal bin_duration, sample-locked mode matches Window's grid.
         self._state.schedule = BinSchedule(bin_duration=self.settings.bin_duration, fractional=self.settings.fractional)
         self._state.schedule.reset(self._state.fs)
+
+        # Output: dense bins at the schedule's gain. Dense COUNT+SUM input stays float32 in its own
+        # namespace (`_process_dense_count_sum`); everything else comes out as numpy float64.
+        dense_count_sum = (
+            not isinstance(message.data, sparse.SparseArray)
+            and self.settings.kernel_type == ActivationKernelType.COUNT
+            and self.settings.aggregation == BinAggregation.SUM
+        )
+        out_dtype = "float32" if dense_count_sum else "float64"
+        self._state.configs = ConfigChain(axis, self._state.schedule.output_gain, out_dtype)
 
     def _decay_to_sample(self, channel: int, target_sample: int) -> None:
         """
@@ -396,6 +397,7 @@ class BinnedKernelActivation(
                     **message.axes,
                     axis: replace(message.axes[axis], gain=step.output_gain),
                 },
+                config_id=self._state.configs.update(message.config_id),
             )
 
         # Bin ends in input samples relative to *this chunk's* start. The schedule
@@ -516,6 +518,7 @@ class BinnedKernelActivation(
                     offset=step.output_offset,
                 ),
             },
+            config_id=self._state.configs.update(message.config_id),
         )
 
     def _bin_durations(self, step, ndim: int) -> npt.NDArray[np.float64]:
@@ -575,6 +578,7 @@ class BinnedKernelActivation(
                     **message.axes,
                     axis: replace(message.axes[axis], gain=step.output_gain),
                 },
+                config_id=self._state.configs.update(message.config_id),
             )
 
         # Bin boundaries in this chunk's sample space, from the shared schedule
@@ -655,6 +659,7 @@ class BinnedKernelActivation(
                     offset=step.output_offset,
                 ),
             },
+            config_id=self._state.configs.update(message.config_id),
         )
 
 

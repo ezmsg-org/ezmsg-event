@@ -9,6 +9,7 @@ from ezmsg.baseproc import (
     processor_state,
     resolve_stream_dim,
 )
+from ezmsg.sigproc.util.segment import ConfigChain
 from ezmsg.util.messages.axisarray import AxisArray
 from ezmsg.util.messages.util import replace
 
@@ -161,6 +162,9 @@ class PoissonEventState:
     threshold: npt.NDArray | None = None
     """Exp(1) threshold for next event for each channel."""
 
+    configs: ConfigChain | None = None
+    """Derives the output's config_id (sparse int8 events at ``output_fs``) from the input's."""
+
     dims: list[str] | None = None
     """Output dims: the resolved stream dimension, then the channel dimension (input must be 2-D)."""
 
@@ -172,6 +176,8 @@ class PoissonEventTransformer(BaseStatefulTransformer[PoissonEventSettings, Axis
         n_channels = message.data.shape[message.get_axis_idx(self.state.dims[1])]
         self.state.accumulated = np.zeros(n_channels)
         self.state.threshold = np.random.exponential(1.0, size=n_channels)
+        compress = None if self.settings.layout == "coo" else self.settings.compress_dims
+        self.state.configs = ConfigChain(self.settings.output_fs, self.settings.layout, compress)
 
     def _process(self, message: AxisArray) -> AxisArray:
         axis, ch_dim = self.state.dims
@@ -196,6 +202,7 @@ class PoissonEventTransformer(BaseStatefulTransformer[PoissonEventSettings, Axis
                     **message.axes,
                     axis: replace(message.axes[axis], gain=1 / self.settings.output_fs),
                 },
+                config_id=self.state.configs.update(message.config_id),
             )
 
         # Get rates array with shape (n_bins, n_channels), contiguous for numba
@@ -253,6 +260,7 @@ class PoissonEventTransformer(BaseStatefulTransformer[PoissonEventSettings, Axis
                 **message.axes,
                 axis: replace(message.axes[axis], gain=1 / self.settings.output_fs),
             },
+            config_id=self.state.configs.update(message.config_id),
         )
 
 
