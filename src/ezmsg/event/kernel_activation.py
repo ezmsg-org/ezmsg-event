@@ -23,7 +23,7 @@ import numpy as np
 import numpy.typing as npt
 import sparse
 from array_api_compat import get_namespace, is_numpy_array
-from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state
+from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state, resolve_stream_dim
 from ezmsg.sigproc.util.binning import BinSchedule
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
@@ -116,6 +116,9 @@ class BinnedKernelActivationState:
     # ezmsg-sigproc dense binner uses, so both land on an identical grid.
     schedule: BinSchedule | None = None
 
+    axis: str = ""
+    """The resolved stream dimension, fixed at reset so every later use agrees."""
+
     bin_max: npt.NDArray[np.float64] | None = None
     """MAX aggregation: the largest activation so far in the open bin, per channel."""
 
@@ -152,8 +155,6 @@ class BinnedKernelActivation(
     """
 
     def _hash_message(self, message: AxisArray) -> int:
-        if "time" not in message.axes or not hasattr(message.axes["time"], "gain"):
-            raise ValueError("Could not determine sample rate from input message")
         # The base class covers the key, the dims, the channel count and the
         # sample rate. Two things it cannot see are added here:
         #   dtype   -- `str()` rather than `.kind`, which mlx arrays do not expose.
@@ -173,7 +174,13 @@ class BinnedKernelActivation(
                 "BinAggregation.MAX is not defined for the COUNT kernel: a count has no time course within a bin. "
                 "Use BinAggregation.SUM for the number of events per bin."
             )
-        n_channels = message.data.shape[message.get_axis_idx("ch")] if "ch" in message.dims else 1
+        axis = resolve_stream_dim(message, self.STREAMING_DIMS)
+        if axis not in message.axes or not hasattr(message.axes[axis], "gain"):
+            raise ValueError("Could not determine sample rate from input message")
+        self._state.axis = axis
+        ax = message.get_axis_idx(axis)
+        # Every non-stream element is a channel (exactly one other dim on the event path).
+        n_channels = math.prod(n for i, n in enumerate(message.data.shape) if i != ax)
 
         self._state.activation = np.zeros(n_channels, dtype=np.float64)
         self._state.dense_carry = None
@@ -186,8 +193,8 @@ class BinnedKernelActivation(
         if self.settings.kernel_type == ActivationKernelType.ALPHA:
             self._state.alpha_aux = np.zeros(n_channels, dtype=np.float64)
 
-        # Cache sample rate -- we know time is in axes because _hash_message would raise an error otherwise
-        time_axis = message.axes["time"]
+        # Cache sample rate -- time is in axes, checked above
+        time_axis = message.axes[axis]
         if time_axis.gain > 0:
             self._state.fs = 1.0 / time_axis.gain
 
@@ -325,7 +332,20 @@ class BinnedKernelActivation(
             - Dense input + any other config: extract events from non-zero entries
               and use the same code path as sparse input.
             - Sparse input: existing event-based path.
+
+        Both paths work on a stream-dim-first layout; any other layout is transposed in and back out.
         """
+        axis = self._state.axis
+        ax = message.get_axis_idx(axis)
+        if ax == 0:
+            return self._process_stream_first(message)
+        perm = (ax, *(i for i in range(message.data.ndim) if i != ax))
+        out = self._process_stream_first(
+            replace(message, data=message.data.transpose(perm), dims=[message.dims[i] for i in perm])
+        )
+        return replace(out, data=out.data.transpose(tuple(np.argsort(perm))), dims=message.dims)
+
+    def _process_stream_first(self, message: AxisArray) -> AxisArray:
         data = message.data
         is_sparse_input = isinstance(data, sparse.SparseArray)
 
@@ -349,7 +369,8 @@ class BinnedKernelActivation(
 
         # Boundary arithmetic is delegated to the shared schedule (samples-per-bin,
         # fractional carry, global bin index, output gain/offset).
-        in_offset = message.axes["time"].offset if "time" in message.axes else 0.0
+        axis = self._state.axis
+        in_offset = message.axes[axis].offset
         n_carry_before = self._state.schedule.carry_count
         step = self._state.schedule.advance(n_new=n_samples, in_offset=in_offset, gain_in=1.0 / self._state.fs)
         n_bins = step.n_bins
@@ -373,7 +394,7 @@ class BinnedKernelActivation(
                 data=np.zeros((0, n_channels), dtype=np.float64),
                 axes={
                     **message.axes,
-                    "time": replace(message.axes["time"], gain=step.output_gain),
+                    axis: replace(message.axes[axis], gain=step.output_gain),
                 },
             )
 
@@ -490,7 +511,7 @@ class BinnedKernelActivation(
             data=output,
             axes={
                 **message.axes,
-                "time": AxisArray.TimeAxis(
+                axis: AxisArray.TimeAxis(
                     fs=1.0 / step.output_gain,
                     offset=step.output_offset,
                 ),
@@ -520,7 +541,8 @@ class BinnedKernelActivation(
         n_samples = data.shape[0]
         feature_shape = tuple(data.shape[1:])
 
-        in_offset = message.axes["time"].offset if "time" in message.axes else 0.0
+        axis = self._state.axis
+        in_offset = message.axes[axis].offset
         n_carry_before = self._state.schedule.carry_count
         step = self._state.schedule.advance(n_new=n_samples, in_offset=in_offset, gain_in=1.0 / self._state.fs)
         n_bins = step.n_bins
@@ -551,7 +573,7 @@ class BinnedKernelActivation(
                 data=xp.zeros((0,) + feature_shape, dtype=xp.float32),
                 axes={
                     **message.axes,
-                    "time": replace(message.axes["time"], gain=step.output_gain),
+                    axis: replace(message.axes[axis], gain=step.output_gain),
                 },
             )
 
@@ -628,7 +650,7 @@ class BinnedKernelActivation(
             data=output,
             axes={
                 **message.axes,
-                "time": AxisArray.TimeAxis(
+                axis: AxisArray.TimeAxis(
                     fs=1.0 / step.output_gain,
                     offset=step.output_offset,
                 ),

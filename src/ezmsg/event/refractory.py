@@ -2,7 +2,7 @@ import ezmsg.core as ez
 import numpy as np
 import numpy.typing as npt
 import sparse
-from ezmsg.baseproc import BaseStatefulTransformer, processor_state
+from ezmsg.baseproc import BaseStatefulTransformer, processor_state, resolve_stream_dim
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 
@@ -18,12 +18,16 @@ class Refractory:
     elapsed: npt.NDArray | None = None
     """Track number of samples since last event for each feature."""
 
+    axis: str = ""
+    """The resolved stream dimension, fixed at reset so every later use agrees."""
+
 
 class RefractoryTransformer(BaseStatefulTransformer[RefractorySettings, AxisArray, AxisArray, Refractory]):
     def _reset_state(self, message: AxisArray) -> None:
-        fs = 1 / message.axes["time"].gain
+        self._state.axis = resolve_stream_dim(message, self.STREAMING_DIMS)
+        fs = 1 / message.axes[self._state.axis].gain
         self._state.width = int(self.settings.dur * fs)
-        ax_idx = message.get_axis_idx("time")
+        ax_idx = message.get_axis_idx(self._state.axis)
         # Get the shape of features (all dims except time)
         feat_shape = message.data.shape[:ax_idx] + message.data.shape[ax_idx + 1 :]
         n_feats = int(np.prod(feat_shape))
@@ -33,7 +37,7 @@ class RefractoryTransformer(BaseStatefulTransformer[RefractorySettings, AxisArra
         if self._state.width <= 2:
             return message
 
-        ax_idx = message.get_axis_idx("time")
+        ax_idx = message.get_axis_idx(self._state.axis)
         n_samps = message.data.shape[ax_idx]
 
         # Get the sparse indices of the message.data
