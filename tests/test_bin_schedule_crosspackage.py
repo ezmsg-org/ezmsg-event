@@ -7,8 +7,8 @@ output time axis (gain + offset) and the same bin counts -- the alignment proper
 the shared primitive exists to guarantee -- including at an off-nominal sample
 rate and under adversarial chunking.
 
-EventRate has ``rate_normalize=True`` (counts / bin_duration), so its values equal
-the SUM binner's values divided by bin_duration; everything else must match exactly.
+EventRate has ``rate_normalize=True`` (counts / each bin's actual duration), so its values
+equal the SUM binner's values divided by that duration; everything else must match exactly.
 """
 
 import numpy as np
@@ -65,8 +65,10 @@ def test_eventrate_and_dense_binner_share_grid(fs: float, block_size: int):
     rate_all = np.concatenate([m.data for m in rate_out], axis=0)
     binner_all = np.concatenate([m.data for m in binner_out], axis=0)
     assert rate_all.shape == binner_all.shape
-    # EventRate divides counts by bin_duration (rate_normalize); undo to compare.
-    np.testing.assert_allclose(rate_all * bin_duration, binner_all, rtol=0, atol=1e-6)
+    # EventRate divides counts by each bin's actual duration (rate_normalize); undo to compare.
+    # Bin m spans samples [int(m * spb), int((m + 1) * spb)), so fractional widths differ by a sample.
+    durations = np.diff((np.arange(rate_all.shape[0] + 1) * (bin_duration * fs)).astype(np.int64)) / fs
+    np.testing.assert_allclose(rate_all * durations[:, None], binner_all, rtol=1e-6, atol=1e-6)  # float32 rates
 
 
 @pytest.mark.parametrize("fs", [30012.0, 30030.0])

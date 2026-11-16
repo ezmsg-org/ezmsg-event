@@ -15,6 +15,7 @@ with dense input fall back to event extraction and use the same code path as spa
 input.
 """
 
+import math
 from enum import Enum
 
 import ezmsg.core as ez
@@ -22,7 +23,7 @@ import numpy as np
 import numpy.typing as npt
 import sparse
 from array_api_compat import get_namespace, is_numpy_array
-from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state
+from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state, resolve_stream_dim
 from ezmsg.sigproc.util.binning import BinSchedule
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
@@ -53,7 +54,7 @@ class BinAggregation(str, Enum):
     """Sum of activation over the bin (for count, this gives total count)."""
 
     MAX = "max"
-    """Maximum activation in the bin."""
+    """Maximum activation at any sample in the bin. Not defined for the COUNT kernel."""
 
 
 class BinnedKernelActivationSettings(ez.Settings):
@@ -79,8 +80,9 @@ class BinnedKernelActivationSettings(ez.Settings):
 
     rate_normalize: bool = False
     """If True, divide output by the bin's duration to get events/second (for COUNT
-    kernel). The divisor is the *actual* bin duration (``samples_per_bin / fs``),
-    which equals ``bin_duration`` exactly in fractional mode."""
+    kernel). The divisor is each bin's *actual* duration (its sample count / fs):
+    with ``fractional=True`` bin widths differ by a sample, so it is not exactly
+    ``bin_duration``, and with ``fractional=False`` it is ``int(bin_duration * fs) / fs``."""
 
     fractional: bool = True
     """If True (default), bins span a *fractional* ``bin_duration * fs`` samples
@@ -114,6 +116,15 @@ class BinnedKernelActivationState:
     # ezmsg-sigproc dense binner uses, so both land on an identical grid.
     schedule: BinSchedule | None = None
 
+    axis: str = ""
+    """The resolved stream dimension, fixed at reset so every later use agrees."""
+
+    bin_max: npt.NDArray[np.float64] | None = None
+    """MAX aggregation: the largest activation so far in the open bin, per channel."""
+
+    bin_sum: npt.NDArray[np.float64] | None = None
+    """SUM or MEAN with a kernel: the activation summed over the open bin's samples so far, per channel."""
+
 
 class BinnedKernelActivation(
     BaseStatefulTransformer[
@@ -144,8 +155,6 @@ class BinnedKernelActivation(
     """
 
     def _hash_message(self, message: AxisArray) -> int:
-        if "time" not in message.axes or not hasattr(message.axes["time"], "gain"):
-            raise ValueError("Could not determine sample rate from input message")
         # The base class covers the key, the dims, the channel count and the
         # sample rate. Two things it cannot see are added here:
         #   dtype   -- `str()` rather than `.kind`, which mlx arrays do not expose.
@@ -160,18 +169,32 @@ class BinnedKernelActivation(
 
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
-        n_channels = message.data.shape[message.get_axis_idx("ch")] if "ch" in message.dims else 1
+        if self.settings.kernel_type == ActivationKernelType.COUNT and self.settings.aggregation == BinAggregation.MAX:
+            raise ValueError(
+                "BinAggregation.MAX is not defined for the COUNT kernel: a count has no time course within a bin. "
+                "Use BinAggregation.SUM for the number of events per bin."
+            )
+        axis = resolve_stream_dim(message, self.STREAMING_DIMS)
+        if axis not in message.axes or not hasattr(message.axes[axis], "gain"):
+            raise ValueError("Could not determine sample rate from input message")
+        self._state.axis = axis
+        ax = message.get_axis_idx(axis)
+        # Every non-stream element is a channel (exactly one other dim on the event path).
+        n_channels = math.prod(n for i, n in enumerate(message.data.shape) if i != ax)
 
         self._state.activation = np.zeros(n_channels, dtype=np.float64)
         self._state.dense_carry = None
-        self._state.samples_since_update = np.zeros(n_channels, dtype=np.int64)
+        # -1: the state describes the instant before the first sample, so MAX sees sample 0 too.
+        self._state.samples_since_update = np.full(n_channels, -1, dtype=np.int64)
+        self._state.bin_max = np.full(n_channels, -np.inf)
+        self._state.bin_sum = np.zeros(n_channels)
 
         # For alpha kernel, we need auxiliary state
         if self.settings.kernel_type == ActivationKernelType.ALPHA:
             self._state.alpha_aux = np.zeros(n_channels, dtype=np.float64)
 
-        # Cache sample rate -- we know time is in axes because _hash_message would raise an error otherwise
-        time_axis = message.axes["time"]
+        # Cache sample rate -- time is in axes, checked above
+        time_axis = message.axes[axis]
         if time_axis.gain > 0:
             self._state.fs = 1.0 / time_axis.gain
 
@@ -204,24 +227,35 @@ class BinnedKernelActivation(
             # Update: aux *= decay, activation = activation * decay + aux * dt / tau
             aux = self._state.alpha_aux[channel]
             self._state.alpha_aux[channel] = aux * decay
-            # For alpha: d(activation)/dt = aux/tau - activation/tau
-            # Integrated: activation(t+dt) = activation(t)*decay + aux*(1-decay)
-            self._state.activation[channel] = self._state.activation[channel] * decay + aux * (1 - decay)
+            # For alpha: d(activation)/dt = aux/tau - activation/tau, with aux decaying too.
+            # Integrated exactly: activation(t+dt) = (activation(t) + aux(t)*dt/tau) * decay,
+            # so the result does not depend on how the interval is split.
+            self._state.activation[channel] = (self._state.activation[channel] + aux * dt / tau_samples) * decay
 
         self._state.samples_since_update[channel] = target_sample
 
     def _add_event(self, channel: int, sample: int, value: float) -> None:
         """Add an event contribution to the state."""
+        max_agg = self.settings.aggregation == BinAggregation.MAX
+        if max_agg:
+            self._track_max(channel, sample - 1)
+        sum_agg = self._kernel_sum()
+        if sum_agg:
+            # Fold samples up to and including this one, before the event; its own k(0) is added below.
+            self._track_sum(channel, sample)
         # First decay to event time
         self._decay_to_sample(channel, sample)
 
         weight = value if self.settings.scale_by_value else 1.0
-        if self.settings.normalize:
+        # A count has no kernel shape to normalise (and the SUM bins count raw weights).
+        if self.settings.normalize and self.settings.kernel_type != ActivationKernelType.COUNT:
             # Normalize so integral equals 1
             weight /= self.settings.tau * self._state.fs
 
         if self.settings.kernel_type == ActivationKernelType.EXPONENTIAL:
             self._state.activation[channel] += weight
+            if sum_agg:
+                self._state.bin_sum[channel] += weight  # k(0) = 1 at the event's own sample (alpha's is 0)
 
         elif self.settings.kernel_type == ActivationKernelType.ALPHA:
             # For alpha kernel, event adds to auxiliary state
@@ -229,6 +263,60 @@ class BinnedKernelActivation(
 
         elif self.settings.kernel_type == ActivationKernelType.COUNT:
             self._state.activation[channel] += weight
+
+        if max_agg:
+            self._state.bin_max[channel] = max(self._state.bin_max[channel], self._state.activation[channel])
+
+    def _track_max(self, channel: int, target_sample: int) -> None:
+        """Fold the activation at samples (last update, target] into ``bin_max``, then decay to target.
+
+        With no event in between, the activation ``k`` samples on is ``(a + u*k/tau) * exp(-k/tau)``
+        (``u`` is alpha's auxiliary state, 0 for exponential), which is largest at either end of the
+        interval or, for alpha, next to its peak at ``k = tau * (1 - a/u)``.
+        """
+        n = target_sample - self._state.samples_since_update[channel]
+        if n <= 0:
+            return
+        tau_samples = self.settings.tau * self._state.fs
+        a = self._state.activation[channel]
+        u = self._state.alpha_aux[channel] if self.settings.kernel_type == ActivationKernelType.ALPHA else 0.0
+        ks = [1, n]
+        if u > 0:
+            peak = tau_samples * (1.0 - a / u)
+            ks += [math.floor(peak), math.ceil(peak)]
+        ks = np.clip(ks, 1, n)
+        values = (a + u * ks / tau_samples) * np.exp(-ks / tau_samples)
+        self._state.bin_max[channel] = max(self._state.bin_max[channel], values.max())
+        self._decay_to_sample(channel, target_sample)
+
+    def _kernel_sum(self) -> bool:
+        """SUM or MEAN with a kernel: both run on ``bin_sum`` (MEAN divides it by the bin's sample count)."""
+        return (
+            self.settings.aggregation in (BinAggregation.SUM, BinAggregation.MEAN)
+            and self.settings.kernel_type != ActivationKernelType.COUNT
+        )
+
+    def _track_sum(self, channel: int, target_sample: int) -> None:
+        """Add the activation at samples (last update, target] to ``bin_sum``, then decay to target.
+
+        With no event in between, the activation ``k`` samples on is ``(a + u*k/tau) * r**k`` with
+        ``r = exp(-1/tau)``, so the sum over ``k = 1..n`` is ``a*S0 + (u/tau)*S1`` with the geometric
+        sums ``S0 = sum r**k`` and ``S1 = sum k*r**k`` in closed form.
+        """
+        n = target_sample - self._state.samples_since_update[channel]
+        if n <= 0:
+            return
+        tau_samples = self.settings.tau * self._state.fs
+        a = self._state.activation[channel]
+        u = self._state.alpha_aux[channel] if self.settings.kernel_type == ActivationKernelType.ALPHA else 0.0
+        r = math.exp(-1.0 / tau_samples)
+        q = -math.expm1(-1.0 / tau_samples)  # 1 - r, without cancellation for long tau
+        rn = math.exp(-n / tau_samples)
+        one_minus_rn = -math.expm1(-n / tau_samples)
+        s0 = r * one_minus_rn / q
+        s1 = r * (one_minus_rn - n * rn * q) / (q * q)
+        self._state.bin_sum[channel] += a * s0 + u * s1 / tau_samples
+        self._decay_to_sample(channel, target_sample)
 
     def _get_activation_at_sample(self, channel: int, sample: int) -> float:
         """Get activation value at a specific sample."""
@@ -244,7 +332,20 @@ class BinnedKernelActivation(
             - Dense input + any other config: extract events from non-zero entries
               and use the same code path as sparse input.
             - Sparse input: existing event-based path.
+
+        Both paths work on a stream-dim-first layout; any other layout is transposed in and back out.
         """
+        axis = self._state.axis
+        ax = message.get_axis_idx(axis)
+        if ax == 0:
+            return self._process_stream_first(message)
+        perm = (ax, *(i for i in range(message.data.ndim) if i != ax))
+        out = self._process_stream_first(
+            replace(message, data=message.data.transpose(perm), dims=[message.dims[i] for i in perm])
+        )
+        return replace(out, data=out.data.transpose(tuple(np.argsort(perm))), dims=message.dims)
+
+    def _process_stream_first(self, message: AxisArray) -> AxisArray:
         data = message.data
         is_sparse_input = isinstance(data, sparse.SparseArray)
 
@@ -268,7 +369,8 @@ class BinnedKernelActivation(
 
         # Boundary arithmetic is delegated to the shared schedule (samples-per-bin,
         # fractional carry, global bin index, output gain/offset).
-        in_offset = message.axes["time"].offset if "time" in message.axes else 0.0
+        axis = self._state.axis
+        in_offset = message.axes[axis].offset
         n_carry_before = self._state.schedule.carry_count
         step = self._state.schedule.advance(n_new=n_samples, in_offset=in_offset, gain_in=1.0 / self._state.fs)
         n_bins = step.n_bins
@@ -284,6 +386,7 @@ class BinnedKernelActivation(
                     channel_idx = int(coords[1, event_idx]) if coords.shape[0] > 1 else 0
                     value = float(values[event_idx])
                     self._add_event(channel_idx, sample_idx, value)
+            self._state.samples_since_update -= n_samples
 
             # Return empty output
             return replace(
@@ -291,7 +394,7 @@ class BinnedKernelActivation(
                 data=np.zeros((0, n_channels), dtype=np.float64),
                 axes={
                     **message.axes,
-                    "time": replace(message.axes["time"], gain=step.output_gain),
+                    axis: replace(message.axes[axis], gain=step.output_gain),
                 },
             )
 
@@ -319,7 +422,10 @@ class BinnedKernelActivation(
         output = np.zeros((n_bins, n_channels), dtype=np.float64)
         event_idx = 0
 
-        if self.settings.aggregation == BinAggregation.LAST:
+        # COUNT has no decay, so its MEAN reads the same running count as LAST.
+        if self.settings.aggregation == BinAggregation.LAST or (
+            self.settings.aggregation == BinAggregation.MEAN and self.settings.kernel_type == ActivationKernelType.COUNT
+        ):
             # For LAST aggregation, process events up to each bin end
             for bin_idx, bin_end in enumerate(bin_ends):
                 bin_end_sample = int(bin_end)
@@ -333,6 +439,22 @@ class BinnedKernelActivation(
                 # Record activation at bin end for each channel
                 for ch in range(n_channels):
                     output[bin_idx, ch] = self._get_activation_at_sample(ch, bin_end_sample)
+
+        elif self._kernel_sum():
+            # Like MAX: `_add_event` folds samples up to each event into `bin_sum`, the rest at the bin's end.
+            for bin_idx, bin_end in enumerate(bin_ends):
+                bin_end_sample = int(bin_end)
+                while event_idx < len(events) and events[event_idx][0] < bin_end_sample:
+                    sample, channel, value = events[event_idx]
+                    self._add_event(channel, sample, value)
+                    event_idx += 1
+                for ch in range(n_channels):
+                    self._track_sum(ch, bin_end_sample - 1)
+                output[bin_idx] = self._state.bin_sum
+                self._state.bin_sum = np.zeros(n_channels)
+            if self.settings.aggregation == BinAggregation.MEAN:
+                # Each bin's actual sample count (fractional bins differ by one; the first includes the carry).
+                output /= np.maximum(np.diff(step.cut_points, prepend=0), 1)[:, None]
 
         elif self.settings.aggregation == BinAggregation.SUM:
             # For SUM, accumulate within each bin
@@ -357,26 +479,19 @@ class BinnedKernelActivation(
 
                 output[bin_idx] = bin_sum
 
-        elif self.settings.aggregation == BinAggregation.MEAN:
-            # For MEAN with kernel, we'd need to integrate activation over bin
-            # Approximate with samples at bin start and end
-            bin_start = 0
+        elif self.settings.aggregation == BinAggregation.MAX:
+            # `_add_event` folds every sample up to and including each event into `bin_max`;
+            # the samples after a bin's last event are folded at its end.
             for bin_idx, bin_end in enumerate(bin_ends):
                 bin_end_sample = int(bin_end)
-
-                # Process events up to bin end
                 while event_idx < len(events) and events[event_idx][0] < bin_end_sample:
                     sample, channel, value = events[event_idx]
                     self._add_event(channel, sample, value)
                     event_idx += 1
-
-                # For exponential kernel, mean over [t0, t1] can be computed analytically
-                # For simplicity, use midpoint approximation
-                midpoint = (bin_start + bin_end_sample) // 2
                 for ch in range(n_channels):
-                    output[bin_idx, ch] = self._get_activation_at_sample(ch, midpoint)
-
-                bin_start = bin_end_sample
+                    self._track_max(ch, bin_end_sample - 1)
+                output[bin_idx] = self._state.bin_max
+                self._state.bin_max = np.full(n_channels, -np.inf)
 
         # Process any remaining events (for state continuity)
         while event_idx < len(events):
@@ -387,22 +502,30 @@ class BinnedKernelActivation(
         # Update state sample counters relative to next chunk
         self._state.samples_since_update -= n_samples
 
-        # Apply rate normalization if requested (divide by the bin's actual
-        # duration to get events/second; == bin_duration in fractional mode).
+        # Apply rate normalization if requested: each bin over its own duration, in events/second.
         if self.settings.rate_normalize:
-            output = output / step.output_gain
+            output = output / self._bin_durations(step, output.ndim)
 
         return replace(
             message,
             data=output,
             axes={
                 **message.axes,
-                "time": AxisArray.TimeAxis(
+                axis: AxisArray.TimeAxis(
                     fs=1.0 / step.output_gain,
                     offset=step.output_offset,
                 ),
             },
         )
+
+    def _bin_durations(self, step, ndim: int) -> npt.NDArray[np.float64]:
+        """Each closed bin's actual duration (its sample count / fs), shaped to divide a stream-first output.
+
+        Fractional bins differ by a sample, and a sample-locked bin is not ``bin_duration`` long either.
+        """
+        # A bin with no samples (bin_duration under one sample) holds a count of 0; keep it 0, not NaN.
+        widths = np.maximum(np.diff(step.cut_points, prepend=0), 1)
+        return (widths / self._state.fs).reshape((-1,) + (1,) * (ndim - 1))
 
     def _process_dense_count_sum(self, message: AxisArray) -> AxisArray:
         """Fast path: dense input + COUNT kernel + SUM aggregation.
@@ -418,7 +541,8 @@ class BinnedKernelActivation(
         n_samples = data.shape[0]
         feature_shape = tuple(data.shape[1:])
 
-        in_offset = message.axes["time"].offset if "time" in message.axes else 0.0
+        axis = self._state.axis
+        in_offset = message.axes[axis].offset
         n_carry_before = self._state.schedule.carry_count
         step = self._state.schedule.advance(n_new=n_samples, in_offset=in_offset, gain_in=1.0 / self._state.fs)
         n_bins = step.n_bins
@@ -449,7 +573,7 @@ class BinnedKernelActivation(
                 data=xp.zeros((0,) + feature_shape, dtype=xp.float32),
                 axes={
                     **message.axes,
-                    "time": replace(message.axes["time"], gain=step.output_gain),
+                    axis: replace(message.axes[axis], gain=step.output_gain),
                 },
             )
 
@@ -519,14 +643,14 @@ class BinnedKernelActivation(
         self._state.dense_carry = new_overflow
 
         if self.settings.rate_normalize:
-            output = output / step.output_gain
+            output = output / xp.asarray(self._bin_durations(step, output.ndim), dtype=output.dtype)
 
         return replace(
             message,
             data=output,
             axes={
                 **message.axes,
-                "time": AxisArray.TimeAxis(
+                axis: AxisArray.TimeAxis(
                     fs=1.0 / step.output_gain,
                     offset=step.output_offset,
                 ),

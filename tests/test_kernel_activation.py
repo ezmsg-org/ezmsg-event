@@ -449,3 +449,204 @@ class TestEmptyTime:
         out_normal = proc(msg_normal)
         assert out_normal.data.ndim == 2
         assert out_normal.data.shape[1] == N_CH
+
+
+def _kernel_reference(events: np.ndarray, kernel_type, tau: float, fs: float, normalize: bool) -> np.ndarray:
+    """Activation at every sample by direct convolution of a dense ``(time, ch)`` event array."""
+    n = np.arange(events.shape[0])
+    tau_s = tau * fs
+    kernel = np.exp(-n / tau_s) if kernel_type == ActivationKernelType.EXPONENTIAL else (n / tau_s) * np.exp(-n / tau_s)
+    if normalize:
+        kernel = kernel / tau_s
+    return np.stack([np.convolve(events[:, c], kernel)[: len(n)] for c in range(events.shape[1])], axis=1)
+
+
+class TestMaxAggregation:
+    """MAX is the largest activation at any sample of the bin, chunked or not."""
+
+    FS = 1000.0
+    SPB = 10  # bin_duration * FS
+
+    def _events(self, scale_by_value: bool) -> np.ndarray:
+        rng = np.random.default_rng(3)
+        events = (rng.random((200, 2)) < 0.04).astype(float)
+        if scale_by_value:
+            events *= rng.normal(size=events.shape)  # mixed signs: the max may sit at a bin's end
+        return events
+
+    def _proc(self, kernel_type, scale_by_value=False, normalize=False):
+        return BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=kernel_type,
+                tau=0.008,
+                bin_duration=self.SPB / self.FS,
+                aggregation=BinAggregation.MAX,
+                scale_by_value=scale_by_value,
+                normalize=normalize,
+            )
+        )
+
+    def _msg(self, data, offset_samples: int, dense: bool) -> AxisArray:
+        return AxisArray(
+            data=data if dense else sparse.COO.from_numpy(data),
+            dims=["time", "ch"],
+            axes={"time": AxisArray.TimeAxis(fs=self.FS, offset=offset_samples / self.FS)},
+        )
+
+    def _run(self, proc, events, chunk: int, dense: bool) -> np.ndarray:
+        outs = [proc(self._msg(events[i : i + chunk], i, dense)).data for i in range(0, events.shape[0], chunk)]
+        return np.concatenate(outs, axis=0)
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    @pytest.mark.parametrize("dense", [False, True], ids=["sparse", "dense"])
+    @pytest.mark.parametrize("chunk", [200, 7, 23], ids=["one_chunk", "sub_bin_chunks", "chunks_across_bins"])
+    @pytest.mark.parametrize("scale_by_value", [False, True], ids=["count", "weighted"])
+    def test_matches_dense_reference(self, kernel_type, dense, chunk, scale_by_value):
+        events = self._events(scale_by_value)
+        ref = _kernel_reference(events, kernel_type, 0.008, self.FS, normalize=True)
+        expected = ref.reshape(-1, self.SPB, ref.shape[1]).max(axis=1)
+        out = self._run(self._proc(kernel_type, scale_by_value, normalize=True), events, chunk, dense)
+        np.testing.assert_allclose(out, expected, rtol=1e-9, atol=1e-12)
+
+    def test_mlx_dense_input_matches_numpy(self):
+        mx = pytest.importorskip("mlx.core")
+        events = self._events(False)
+        out_np = self._proc(ActivationKernelType.ALPHA)(self._msg(events, 0, dense=True)).data
+        out_mx = self._proc(ActivationKernelType.ALPHA)(self._msg(mx.array(events), 0, dense=True)).data
+        np.testing.assert_allclose(np.asarray(out_mx), out_np, rtol=1e-6)
+
+    def test_count_kernel_refuses_max(self):
+        with pytest.raises(ValueError, match="MAX"):
+            self._proc(ActivationKernelType.COUNT)(self._msg(self._events(False), 0, dense=False))
+
+
+class TestAlphaIsExact:
+    """The alpha activation is (t/tau) exp(-t/tau) whatever the bin width it is sampled at."""
+
+    @pytest.mark.parametrize("bin_duration", [0.005, 0.010, 0.050])
+    def test_single_event_follows_the_kernel(self, bin_duration):
+        proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.ALPHA,
+                tau=0.020,
+                bin_duration=bin_duration,
+                aggregation=BinAggregation.LAST,
+                normalize=False,
+            )
+        )
+        out = proc(make_sparse_message(coords=[(0, 0)], values=[1], shape=(200, 1)))
+        t = (np.arange(out.data.shape[0]) + 1) * bin_duration / 0.020
+        np.testing.assert_allclose(out.data[:, 0], t * np.exp(-t), rtol=1e-9)
+
+
+@pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+def test_last_is_chunk_invariant_with_sub_bin_chunks(kernel_type):
+    """A chunk too short to close a bin must still advance the decay clock."""
+    events = (np.random.default_rng(5).random((200, 2)) < 0.04).astype(float)
+
+    def run(chunk):
+        proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(kernel_type=kernel_type, tau=0.008, bin_duration=0.010)
+        )
+        return np.concatenate(
+            [
+                proc(
+                    AxisArray(
+                        sparse.COO.from_numpy(events[i : i + chunk]),
+                        dims=["time", "ch"],
+                        axes={"time": AxisArray.TimeAxis(fs=1000.0, offset=i / 1000.0)},
+                    )
+                ).data
+                for i in range(0, 200, chunk)
+            ]
+        )
+
+    np.testing.assert_allclose(run(7), run(200), rtol=1e-9)
+
+
+class TestKernelSum:
+    """SUM with a kernel is the per-sample activation summed over each bin's samples."""
+
+    FS = 1000.0
+
+    AGGREGATION = BinAggregation.SUM
+
+    def _run(self, kernel_type, events, chunks, bin_duration=0.010, scale_by_value=False) -> np.ndarray:
+        proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=kernel_type,
+                tau=0.008,
+                bin_duration=bin_duration,
+                aggregation=self.AGGREGATION,
+                scale_by_value=scale_by_value,
+            )
+        )
+        starts = np.cumsum([0, *chunks])
+        assert starts[-1] == events.shape[0]
+        outs = [
+            proc(
+                AxisArray(
+                    sparse.COO.from_numpy(events[a:b]),
+                    dims=["time", "ch"],
+                    axes={"time": AxisArray.TimeAxis(fs=self.FS, offset=a / self.FS)},
+                )
+            ).data
+            for a, b in zip(starts[:-1], starts[1:])
+        ]
+        return np.concatenate(outs, axis=0)
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    @pytest.mark.parametrize("scale_by_value", [False, True], ids=["count", "weighted"])
+    def test_matches_dense_reference(self, kernel_type, scale_by_value):
+        rng = np.random.default_rng(7)
+        events = (rng.random((200, 2)) < 0.05).astype(float)
+        if scale_by_value:
+            events *= rng.normal(size=events.shape)
+        ref = _kernel_reference(events, kernel_type, 0.008, self.FS, normalize=True)
+        expected = ref.reshape(-1, 10, 2).sum(axis=1)
+        out = self._run(kernel_type, events, [200], scale_by_value=scale_by_value)
+        np.testing.assert_allclose(out, expected, rtol=1e-9, atol=1e-12)
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    @pytest.mark.parametrize("bin_duration", [0.010, 0.0075], ids=["whole", "fractional"])
+    def test_irregular_chunks_match_one_chunk(self, kernel_type, bin_duration):
+        """Chunks shorter than a bin, and bins split over several chunks, lose no events."""
+        events = (np.random.default_rng(8).random((200, 2)) < 0.05).astype(float)
+        chunks = [3, 1, 4, 1, 5, 9, 2, 6, 25, 3, 50, 7, 1, 83]
+        np.testing.assert_allclose(
+            self._run(kernel_type, events, chunks, bin_duration),
+            self._run(kernel_type, events, [200], bin_duration),
+            rtol=1e-9,
+            atol=1e-12,
+        )
+
+
+class TestKernelMean(TestKernelSum):
+    """MEAN with a kernel is the per-sample activation averaged over each bin's samples."""
+
+    AGGREGATION = BinAggregation.MEAN
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    @pytest.mark.parametrize("scale_by_value", [False, True], ids=["count", "weighted"])
+    @pytest.mark.parametrize("bin_duration", [0.010, 0.0075], ids=["whole", "fractional"])
+    def test_matches_dense_reference(self, kernel_type, scale_by_value, bin_duration):
+        rng = np.random.default_rng(7)
+        events = (rng.random((200, 2)) < 0.05).astype(float)
+        if scale_by_value:
+            events *= rng.normal(size=events.shape)
+        ref = _kernel_reference(events, kernel_type, 0.008, self.FS, normalize=True)
+        # Fractional 7.5-sample bins end at floor(7.5 * k): widths alternate 7 and 8.
+        ends = np.floor(np.arange(1, 200 / (bin_duration * self.FS) + 1) * bin_duration * self.FS + 1e-9).astype(int)
+        ends = ends[ends <= 200]
+        assert set(np.diff(ends)) == ({10} if bin_duration == 0.010 else {7, 8})
+        starts = np.concatenate(([0], ends[:-1]))
+        expected = np.stack([ref[a:b].mean(axis=0) for a, b in zip(starts, ends)])
+        out = self._run(kernel_type, events, [200], bin_duration, scale_by_value=scale_by_value)
+        np.testing.assert_allclose(out, expected, rtol=1e-9, atol=1e-12)
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    def test_irregular_chunks_match_dense_reference(self, kernel_type):
+        events = (np.random.default_rng(8).random((200, 2)) < 0.05).astype(float)
+        ref = _kernel_reference(events, kernel_type, 0.008, self.FS, normalize=True)
+        out = self._run(kernel_type, events, [3, 1, 4, 1, 5, 9, 2, 6, 25, 3, 50, 7, 1, 83])
+        np.testing.assert_allclose(out, ref.reshape(-1, 10, 2).mean(axis=1), rtol=1e-9, atol=1e-12)

@@ -7,6 +7,7 @@ from ezmsg.baseproc import (
     BaseStatefulTransformer,
     BaseTransformerUnit,
     processor_state,
+    resolve_stream_dim,
 )
 from ezmsg.util.messages.axisarray import AxisArray
 from ezmsg.util.messages.util import replace
@@ -160,22 +161,27 @@ class PoissonEventState:
     threshold: npt.NDArray | None = None
     """Exp(1) threshold for next event for each channel."""
 
+    dims: list[str] | None = None
+    """Output dims: the resolved stream dimension, then the channel dimension (input must be 2-D)."""
+
 
 class PoissonEventTransformer(BaseStatefulTransformer[PoissonEventSettings, AxisArray, AxisArray, PoissonEventState]):
     def _reset_state(self, message: AxisArray) -> None:
-        ch_ax = message.get_axis_idx("ch")
-        n_channels = message.data.shape[ch_ax]
+        axis = resolve_stream_dim(message, self.STREAMING_DIMS)
+        self.state.dims = [axis] + [d for d in message.dims if d != axis]
+        n_channels = message.data.shape[message.get_axis_idx(self.state.dims[1])]
         self.state.accumulated = np.zeros(n_channels)
         self.state.threshold = np.random.exponential(1.0, size=n_channels)
 
     def _process(self, message: AxisArray) -> AxisArray:
-        time_ax = message.get_axis_idx("time")
+        axis, ch_dim = self.state.dims
+        time_ax = message.get_axis_idx(axis)
         n_bins = message.data.shape[time_ax]
-        bin_duration = message.axes["time"].gain
+        bin_duration = message.axes[axis].gain
         total_samples = n_bins * int(bin_duration * self.settings.output_fs)
 
         if n_bins == 0:
-            ch_ax = message.get_axis_idx("ch")
+            ch_ax = message.get_axis_idx(ch_dim)
             n_channels = message.data.shape[ch_ax]
             event_array = sparse.COO(
                 coords=np.zeros((2, 0), dtype=np.int64),
@@ -185,10 +191,10 @@ class PoissonEventTransformer(BaseStatefulTransformer[PoissonEventSettings, Axis
             return replace(
                 message,
                 data=event_array,
-                dims=["time", "ch"],
+                dims=[axis, ch_dim],
                 axes={
                     **message.axes,
-                    "time": replace(message.axes["time"], gain=1 / self.settings.output_fs),
+                    axis: replace(message.axes[axis], gain=1 / self.settings.output_fs),
                 },
             )
 
@@ -242,10 +248,10 @@ class PoissonEventTransformer(BaseStatefulTransformer[PoissonEventSettings, Axis
         return replace(
             message,
             data=event_array,
-            dims=["time", "ch"],
+            dims=[axis, ch_dim],
             axes={
                 **message.axes,
-                "time": replace(message.axes["time"], gain=1 / self.settings.output_fs),
+                axis: replace(message.axes[axis], gain=1 / self.settings.output_fs),
             },
         )
 

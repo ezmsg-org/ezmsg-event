@@ -255,3 +255,28 @@ class TestRefractoryTransformer:
         out_normal = proc(msg_normal)
         assert isinstance(out_normal.data, sparse.SparseArray)
         assert out_normal.data.shape[1] == N_CH
+
+    def test_values_stay_with_their_events(self):
+        """Time-first input is ordered by time, not by feature: each kept event must keep its own value."""
+        fs, width = 1000.0, 10
+        dense = np.zeros((50, 3))
+        for t, ch, v in [(5, 0, 7), (12, 0, 1), (30, 0, 4), (3, 1, 3), (9, 1, 2), (40, 1, 8), (20, 2, 9)]:
+            dense[t, ch] = v
+        msg = AxisArray(
+            data=sparse.COO.from_numpy(dense),
+            dims=["time", "ch"],
+            axes={"time": AxisArray.Axis.TimeAxis(fs=fs, offset=0.0)},
+        )
+
+        # Reference: per channel, keep an event only if it comes more than `width` samples after the last kept one.
+        expected = np.zeros_like(dense)
+        for ch in range(dense.shape[1]):
+            last = -np.inf
+            for t in np.flatnonzero(dense[:, ch]):
+                if t - last > width:
+                    expected[t, ch] = dense[t, ch]
+                    last = t
+
+        result = RefractoryTransformer(RefractorySettings(dur=width / fs))(msg)
+        assert result.data.nnz == 5  # (12, 0) and (9, 1) are dropped
+        np.testing.assert_array_equal(result.data.todense(), expected)

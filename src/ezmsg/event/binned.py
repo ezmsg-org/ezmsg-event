@@ -16,11 +16,12 @@ Sparse ``sparse.COO`` inputs (e.g. the default
 :obj:`ezmsg.event.peak.ThresholdCrossing` output) are densified to per-sample
 contributions before binning; dense inputs are used as is. Set
 ``scale_by_value=True`` to weight each event by its stored value instead of
-counting occurrences, and ``scale_output=True`` to divide the per-bin count by
-``bin_duration`` (events/second).
+counting occurrences, and ``scale_output=True`` to divide each bin's count by
+that bin's actual duration (events/second).
 """
 
 import ezmsg.core as ez
+import numpy as np
 import sparse
 from array_api_compat import get_namespace
 from ezmsg.baseproc import (
@@ -39,7 +40,9 @@ class BinnedEventAggregatorSettings(ez.Settings):
     """Duration of each output bin in seconds."""
 
     scale_output: bool = True
-    """If True, divide each bin's count by ``bin_duration`` (events/second)."""
+    """If True, divide each bin's count by its actual duration, its sample count / fs (events/second).
+    That is not exactly ``bin_duration``: fractional bins differ by a sample, and sample-locked bins
+    span ``int(bin_duration * fs)`` samples."""
 
     axis: str | None = None
     """.. deprecated:: 1.4
@@ -103,7 +106,16 @@ class BinnedEventAggregator(BaseTransformer[BinnedEventAggregatorSettings, AxisA
         binned = self._binner(replace(message, data=contrib))
 
         if self.settings.scale_output and binned.data.size:
-            binned = replace(binned, data=binned.data / self.settings.bin_duration)
+            # The bins just closed are the schedule's last n; bin m spans samples [int(m*spb), int((m+1)*spb)).
+            sched = self._binner.state.schedule
+            ax = binned.get_axis_idx(self._binner.state.axis)
+            n = binned.data.shape[ax]
+            edges = (np.arange(sched.n_bins_done - n, sched.n_bins_done + 1) * sched.spb).astype(np.int64)
+            # A bin with no samples (bin_duration under one sample) holds a count of 0; keep it 0, not NaN.
+            durations = np.maximum(np.diff(edges), 1) / sched.fs
+            shape = [1] * binned.data.ndim
+            shape[ax] = n
+            binned = replace(binned, data=binned.data / xp.asarray(durations.reshape(shape), dtype=binned.data.dtype))
         return binned
 
 

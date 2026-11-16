@@ -9,7 +9,7 @@ import ezmsg.core as ez
 import numba
 import numpy as np
 import numpy.typing as npt
-from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state
+from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state, resolve_stream_dim
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 from .kernel import Kernel, MultiKernel
@@ -108,6 +108,9 @@ class SparseKernelInserterState:
     value_to_row: dict | None = None
     default_row: int = 0
 
+    axis: str = ""
+    """The resolved stream dimension, fixed at reset so every later use agrees."""
+
 
 class SparseKernelInserter(
     BaseStatefulTransformer[
@@ -120,12 +123,10 @@ class SparseKernelInserter(
     """
     Insert kernels at sparse event locations, producing dense output.
 
-    Input: AxisArray with sparse.COO data where:
-        - coords[0]: sample indices (time)
-        - coords[1]: channel indices
-        - data: event values (used for MultiKernel selection or scaling)
+    Input: AxisArray with 2-D sparse.COO data, one dim the stream dim (``stream_dim``) and the
+    other the channels; data are event values (used for MultiKernel selection or scaling).
 
-    Output: AxisArray with dense data containing inserted kernels.
+    Output: AxisArray with dense data containing inserted kernels, in the input's layout.
 
     Features:
         - Handles chunk boundaries seamlessly (kernel tails carry over)
@@ -200,7 +201,9 @@ class SparseKernelInserter(
 
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
-        n_channels = message.data.shape[1] if message.data.ndim > 1 else 1
+        self._state.axis = resolve_stream_dim(message, self.STREAMING_DIMS)
+        ax = message.get_axis_idx(self._state.axis)
+        n_channels = int(np.prod([n for i, n in enumerate(message.data.shape) if i != ax]))
         max_overlap = self._get_max_kernel_length() - 1
         if max_overlap > 0:
             self._state.pending = np.zeros(
@@ -231,6 +234,15 @@ class SparseKernelInserter(
 
     def _process(self, message: AxisArray) -> AxisArray:
         """Insert kernels at sparse event locations."""
+        axis = self._state.axis
+        ax = message.get_axis_idx(axis)
+        if ax != 0:
+            # The insertion works stream-dim first; transpose in and back out.
+            perm = (ax, *(i for i in range(message.data.ndim) if i != ax))
+            out = self._process(
+                replace(message, data=message.data.transpose(perm), dims=[message.dims[i] for i in perm])
+            )
+            return replace(out, data=out.data.transpose(tuple(np.argsort(perm))), dims=message.dims)
         sparse_data = message.data
         n_samples = sparse_data.shape[0]
         n_channels = sparse_data.shape[1] if sparse_data.ndim > 1 else 1

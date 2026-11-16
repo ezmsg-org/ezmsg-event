@@ -23,6 +23,7 @@ from ezmsg.baseproc import (
     BaseStatefulTransformer,
     BaseTransformerUnit,
     processor_state,
+    resolve_stream_dim,
     suppress_axis_deprecation,
 )
 from ezmsg.sigproc.scaler import AdaptiveStandardScalerTransformer
@@ -101,19 +102,27 @@ class ThresholdCrossingState:
     Lives in the input's namespace: numpy (flat ``(prod(features),)``) for the cpu
     event-loop path, MLX (shape ``(*features,)``) for the on-device Metal path."""
 
+    axis: str = ""
+    """The resolved stream dimension, fixed at reset so every later use agrees."""
+
 
 class ThresholdCrossingTransformer(
     BaseStatefulTransformer[ThresholdSettings, AxisArray, AxisArray, ThresholdCrossingState]
 ):
-    """Transformer that detects threshold crossing events."""
+    """Transformer that detects threshold crossing events.
+
+    The output has the stream dimension first, whatever the input's layout.
+    """
 
     def _reset_state(self, message: AxisArray) -> None:
         """Reset the state variables."""
         xp = get_namespace(message.data)
-        ax_idx = message.get_axis_idx("time")
+        axis = resolve_stream_dim(message, self.STREAMING_DIMS)
+        self._state.axis = axis
+        ax_idx = message.get_axis_idx(axis)
 
         # Precalculate some simple math we'd otherwise have to calculate on every iteration.
-        fs = 1 / message.axes["time"].gain
+        fs = 1 / message.axes[axis].gain
         self._state.max_width = int(self.settings.max_peak_dur * fs)
         self._state.min_width = int(self.settings.min_peak_dur * fs)
         self._state.refrac_width = int(self.settings.refrac_dur * fs)
@@ -127,14 +136,13 @@ class ThresholdCrossingTransformer(
         self._state.scaler = None
         self._state.data_raw = None
         if self.settings.auto_scale_tau > 0:
-            # This module works on "time" throughout (see get_axis_idx calls
-            # below), so the scaler has to as well -- they share the state that
-            # normalises the samples being thresholded. Suppressed rather than
-            # dropped for that reason: letting the scaler follow stream_dim while
-            # everything around it used "time" would be worse than either.
+            # This module works on the axis resolved here throughout, so the
+            # scaler has to as well -- they share the state that normalises the
+            # samples being thresholded. Passed explicitly (deprecation warning
+            # suppressed) so the two cannot resolve it differently.
             with suppress_axis_deprecation():
                 self._state.scaler = AdaptiveStandardScalerTransformer(
-                    time_constant=self.settings.auto_scale_tau, axis="time"
+                    time_constant=self.settings.auto_scale_tau, axis=axis
                 )
             if self.settings.return_peak_val:
                 self._state.data_raw = first_samp
@@ -211,13 +219,14 @@ class ThresholdCrossingTransformer(
         from the previous chunk into this output)."""
         if t0_offset_samples == 0:
             return replace(message, data=data)
-        time_axis = message.axes["time"]
+        axis = self._state.axis
+        time_axis = message.axes[axis]
         return replace(
             message,
             data=data,
             axes={
                 **message.axes,
-                "time": replace(time_axis, offset=time_axis.offset + t0_offset_samples * time_axis.gain),
+                axis: replace(time_axis, offset=time_axis.offset + t0_offset_samples * time_axis.gain),
             },
         )
 
@@ -250,15 +259,15 @@ class ThresholdCrossingTransformer(
             AxisArray with sparse data containing detected events
         """
         xp = get_namespace(message.data)
-        ax_idx = message.get_axis_idx("time")
+        ax_idx = message.get_axis_idx(self._state.axis)
 
-        # If the time axis is not the last axis, we need to move it to the end.
+        # If the time axis is not the first axis, we need to move it to the front.
         if ax_idx != 0:
             perm = (ax_idx,) + tuple(i for i in range(message.data.ndim) if i != ax_idx)
             message = replace(
                 message,
                 data=xp.permute_dims(message.data, perm),
-                dims=["time"] + message.dims[:ax_idx] + message.dims[ax_idx + 1 :],
+                dims=[self._state.axis] + message.dims[:ax_idx] + message.dims[ax_idx + 1 :],
             )
 
         # An empty chunk produces an empty output regardless of backend or buffered state

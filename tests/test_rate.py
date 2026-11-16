@@ -200,3 +200,33 @@ def test_rate_empty_time_first():
     out_normal = proc(msg_normal)
     assert out_normal.data.ndim == 2
     assert out_normal.data.shape[1] == N_CH
+
+
+@pytest.mark.parametrize("fractional", [False, True])
+@pytest.mark.parametrize("dense", [False, True], ids=["sparse", "dense"])
+@pytest.mark.parametrize("chunk", [400, 7])
+def test_rate_divides_each_bin_by_its_actual_width(fractional: bool, dense: bool, chunk: int):
+    """12.5 ms at 1 kHz is not a whole number of samples: sample-locked bins hold 12 samples
+    and fractional bins alternate 12 and 13. An event at every sample is 1000 events/s,
+    which every bin must report."""
+    fs = 1000.0
+    events = np.ones((400, 2), dtype=np.float32)
+    events[:, 1] = 0.0
+    proc = Rate(EventRateSettings(bin_duration=0.0125, fractional=fractional))
+    out = np.concatenate(
+        [
+            np.asarray(
+                proc(
+                    AxisArray(
+                        data=events[i : i + chunk] if dense else sparse.COO.from_numpy(events[i : i + chunk]),
+                        dims=["time", "ch"],
+                        axes={"time": AxisArray.TimeAxis(fs=fs, offset=i / fs)},
+                    )
+                ).data
+            )
+            for i in range(0, events.shape[0], chunk)
+        ]
+    )
+    assert out.shape[0] > 20
+    np.testing.assert_allclose(out[:, 0], 1000.0, rtol=1e-6)
+    np.testing.assert_array_equal(out[:, 1], 0.0)
