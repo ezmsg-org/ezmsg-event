@@ -256,22 +256,15 @@ class SparseKernelInserter(
         # Initialize output array
         output = np.zeros((n_samples, n_channels), dtype=self.settings.output_dtype)
 
-        # Add pending contributions from previous chunk
+        # Add pending contributions from previous chunk; what extends past this
+        # (shorter, possibly empty) chunk moves to the front of the buffer.
         if self._state.pending is not None and self._state.pending_length > 0:
             overlap = min(self._state.pending_length, n_samples)
             output[:overlap] += self._state.pending[:overlap]
-
-        # Reset pending for this chunk
-        max_overlap = self._get_max_kernel_length() - 1
-        if max_overlap > 0:
-            if self._state.pending is None or self._state.pending.shape[0] < max_overlap:
-                self._state.pending = np.zeros(
-                    (max_overlap, n_channels),
-                    dtype=self.settings.output_dtype,
-                )
-            else:
-                self._state.pending[:] = 0
-            self._state.pending_length = 0
+            rest = self._state.pending_length - overlap
+            self._state.pending[:rest] = self._state.pending[overlap : overlap + rest]
+            self._state.pending[rest:] = 0
+            self._state.pending_length = rest
 
         # Process each event
         if hasattr(sparse_data, "coords") and hasattr(sparse_data, "data") and len(sparse_data.data) > 0:

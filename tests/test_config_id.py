@@ -161,3 +161,28 @@ class TestKernelActivationResetsOnADeclaredChange:
         proc(self._late_events())
         nxt = replace(_events(seed=3), axes={**_events().axes, "time": AxisArray.TimeAxis(fs=FS, offset=0.1)})
         assert not np.array_equal(proc(nxt).data, self._proc()(nxt).data)
+
+
+class TestKernelInserterTail:
+    @staticmethod
+    def _proc():
+        return SparseKernelInserter(SparseKernelInserterSettings(kernel=ArrayKernel(np.arange(1.0, 6.0))))
+
+    @staticmethod
+    def _at(sample, n=10, offset=0.0, segment=0):
+        coords = np.array([[sample], [0]]) if sample is not None else np.zeros((2, 0), dtype=int)
+        values = np.ones(coords.shape[1], dtype=int)
+        return _declare(sparse.COO(coords, values, shape=(n, 2)), offset=offset, segment=segment)
+
+    def test_short_and_empty_chunks_keep_the_tail(self):
+        """A chunk shorter than the tail (here empty, then one sample) used to drop the rest."""
+        proc = self._proc()
+        outs = [
+            proc(self._at(8)),
+            proc(self._at(None, n=0, offset=0.010)),
+            proc(self._at(None, n=1, offset=0.010)),
+            proc(self._at(None, n=10, offset=0.011)),
+        ]
+        full = np.concatenate([o.data[:, 0] for o in outs])
+        np.testing.assert_array_equal(full[8:13], [1.0, 2.0, 3.0, 4.0, 5.0])
+        assert full.sum() == 15.0
