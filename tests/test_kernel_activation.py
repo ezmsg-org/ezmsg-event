@@ -449,3 +449,47 @@ class TestEmptyTime:
         out_normal = proc(msg_normal)
         assert out_normal.data.ndim == 2
         assert out_normal.data.shape[1] == N_CH
+
+
+class TestAlphaIsExact:
+    """The alpha activation is (t/tau) exp(-t/tau) whatever the bin width it is sampled at."""
+
+    @pytest.mark.parametrize("bin_duration", [0.005, 0.010, 0.050])
+    def test_single_event_follows_the_kernel(self, bin_duration):
+        proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.ALPHA,
+                tau=0.020,
+                bin_duration=bin_duration,
+                aggregation=BinAggregation.LAST,
+                normalize=False,
+            )
+        )
+        out = proc(make_sparse_message(coords=[(0, 0)], values=[1], shape=(200, 1)))
+        t = (np.arange(out.data.shape[0]) + 1) * bin_duration / 0.020
+        np.testing.assert_allclose(out.data[:, 0], t * np.exp(-t), rtol=1e-9)
+
+
+@pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+def test_last_is_chunk_invariant_with_sub_bin_chunks(kernel_type):
+    """A chunk too short to close a bin must still advance the decay clock."""
+    events = (np.random.default_rng(5).random((200, 2)) < 0.04).astype(float)
+
+    def run(chunk):
+        proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(kernel_type=kernel_type, tau=0.008, bin_duration=0.010)
+        )
+        return np.concatenate(
+            [
+                proc(
+                    AxisArray(
+                        sparse.COO.from_numpy(events[i : i + chunk]),
+                        dims=["time", "ch"],
+                        axes={"time": AxisArray.TimeAxis(fs=1000.0, offset=i / 1000.0)},
+                    )
+                ).data
+                for i in range(0, 200, chunk)
+            ]
+        )
+
+    np.testing.assert_allclose(run(7), run(200), rtol=1e-9)

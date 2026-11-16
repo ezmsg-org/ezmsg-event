@@ -204,9 +204,10 @@ class BinnedKernelActivation(
             # Update: aux *= decay, activation = activation * decay + aux * dt / tau
             aux = self._state.alpha_aux[channel]
             self._state.alpha_aux[channel] = aux * decay
-            # For alpha: d(activation)/dt = aux/tau - activation/tau
-            # Integrated: activation(t+dt) = activation(t)*decay + aux*(1-decay)
-            self._state.activation[channel] = self._state.activation[channel] * decay + aux * (1 - decay)
+            # For alpha: d(activation)/dt = aux/tau - activation/tau, with aux decaying too.
+            # Integrated exactly: activation(t+dt) = (activation(t) + aux(t)*dt/tau) * decay,
+            # so the result does not depend on how the interval is split.
+            self._state.activation[channel] = (self._state.activation[channel] + aux * dt / tau_samples) * decay
 
         self._state.samples_since_update[channel] = target_sample
 
@@ -216,7 +217,8 @@ class BinnedKernelActivation(
         self._decay_to_sample(channel, sample)
 
         weight = value if self.settings.scale_by_value else 1.0
-        if self.settings.normalize:
+        # A count has no kernel shape to normalise (and the SUM bins count raw weights).
+        if self.settings.normalize and self.settings.kernel_type != ActivationKernelType.COUNT:
             # Normalize so integral equals 1
             weight /= self.settings.tau * self._state.fs
 
@@ -284,6 +286,7 @@ class BinnedKernelActivation(
                     channel_idx = int(coords[1, event_idx]) if coords.shape[0] > 1 else 0
                     value = float(values[event_idx])
                     self._add_event(channel_idx, sample_idx, value)
+            self._state.samples_since_update -= n_samples
 
             # Return empty output
             return replace(
