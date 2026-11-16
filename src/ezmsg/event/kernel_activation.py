@@ -15,6 +15,7 @@ with dense input fall back to event extraction and use the same code path as spa
 input.
 """
 
+import math
 from enum import Enum
 
 import ezmsg.core as ez
@@ -53,7 +54,7 @@ class BinAggregation(str, Enum):
     """Sum of activation over the bin (for count, this gives total count)."""
 
     MAX = "max"
-    """Maximum activation in the bin."""
+    """Maximum activation at any sample in the bin. Not defined for the COUNT kernel."""
 
 
 class BinnedKernelActivationSettings(ez.Settings):
@@ -114,6 +115,9 @@ class BinnedKernelActivationState:
     # ezmsg-sigproc dense binner uses, so both land on an identical grid.
     schedule: BinSchedule | None = None
 
+    bin_max: npt.NDArray[np.float64] | None = None
+    """MAX aggregation: the largest activation so far in the open bin, per channel."""
+
 
 class BinnedKernelActivation(
     BaseStatefulTransformer[
@@ -160,11 +164,18 @@ class BinnedKernelActivation(
 
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
+        if self.settings.kernel_type == ActivationKernelType.COUNT and self.settings.aggregation == BinAggregation.MAX:
+            raise ValueError(
+                "BinAggregation.MAX is not defined for the COUNT kernel: a count has no time course within a bin. "
+                "Use BinAggregation.SUM for the number of events per bin."
+            )
         n_channels = message.data.shape[message.get_axis_idx("ch")] if "ch" in message.dims else 1
 
         self._state.activation = np.zeros(n_channels, dtype=np.float64)
         self._state.dense_carry = None
-        self._state.samples_since_update = np.zeros(n_channels, dtype=np.int64)
+        # -1: the state describes the instant before the first sample, so MAX sees sample 0 too.
+        self._state.samples_since_update = np.full(n_channels, -1, dtype=np.int64)
+        self._state.bin_max = np.full(n_channels, -np.inf)
 
         # For alpha kernel, we need auxiliary state
         if self.settings.kernel_type == ActivationKernelType.ALPHA:
@@ -213,6 +224,9 @@ class BinnedKernelActivation(
 
     def _add_event(self, channel: int, sample: int, value: float) -> None:
         """Add an event contribution to the state."""
+        max_agg = self.settings.aggregation == BinAggregation.MAX
+        if max_agg:
+            self._track_max(channel, sample - 1)
         # First decay to event time
         self._decay_to_sample(channel, sample)
 
@@ -231,6 +245,31 @@ class BinnedKernelActivation(
 
         elif self.settings.kernel_type == ActivationKernelType.COUNT:
             self._state.activation[channel] += weight
+
+        if max_agg:
+            self._state.bin_max[channel] = max(self._state.bin_max[channel], self._state.activation[channel])
+
+    def _track_max(self, channel: int, target_sample: int) -> None:
+        """Fold the activation at samples (last update, target] into ``bin_max``, then decay to target.
+
+        With no event in between, the activation ``k`` samples on is ``(a + u*k/tau) * exp(-k/tau)``
+        (``u`` is alpha's auxiliary state, 0 for exponential), which is largest at either end of the
+        interval or, for alpha, next to its peak at ``k = tau * (1 - a/u)``.
+        """
+        n = target_sample - self._state.samples_since_update[channel]
+        if n <= 0:
+            return
+        tau_samples = self.settings.tau * self._state.fs
+        a = self._state.activation[channel]
+        u = self._state.alpha_aux[channel] if self.settings.kernel_type == ActivationKernelType.ALPHA else 0.0
+        ks = [1, n]
+        if u > 0:
+            peak = tau_samples * (1.0 - a / u)
+            ks += [math.floor(peak), math.ceil(peak)]
+        ks = np.clip(ks, 1, n)
+        values = (a + u * ks / tau_samples) * np.exp(-ks / tau_samples)
+        self._state.bin_max[channel] = max(self._state.bin_max[channel], values.max())
+        self._decay_to_sample(channel, target_sample)
 
     def _get_activation_at_sample(self, channel: int, sample: int) -> float:
         """Get activation value at a specific sample."""
@@ -380,6 +419,20 @@ class BinnedKernelActivation(
                     output[bin_idx, ch] = self._get_activation_at_sample(ch, midpoint)
 
                 bin_start = bin_end_sample
+
+        elif self.settings.aggregation == BinAggregation.MAX:
+            # `_add_event` folds every sample up to and including each event into `bin_max`;
+            # the samples after a bin's last event are folded at its end.
+            for bin_idx, bin_end in enumerate(bin_ends):
+                bin_end_sample = int(bin_end)
+                while event_idx < len(events) and events[event_idx][0] < bin_end_sample:
+                    sample, channel, value = events[event_idx]
+                    self._add_event(channel, sample, value)
+                    event_idx += 1
+                for ch in range(n_channels):
+                    self._track_max(ch, bin_end_sample - 1)
+                output[bin_idx] = self._state.bin_max
+                self._state.bin_max = np.full(n_channels, -np.inf)
 
         # Process any remaining events (for state continuity)
         while event_idx < len(events):

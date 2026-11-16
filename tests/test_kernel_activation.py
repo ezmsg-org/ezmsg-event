@@ -451,6 +451,75 @@ class TestEmptyTime:
         assert out_normal.data.shape[1] == N_CH
 
 
+def _kernel_reference(events: np.ndarray, kernel_type, tau: float, fs: float, normalize: bool) -> np.ndarray:
+    """Activation at every sample by direct convolution of a dense ``(time, ch)`` event array."""
+    n = np.arange(events.shape[0])
+    tau_s = tau * fs
+    kernel = np.exp(-n / tau_s) if kernel_type == ActivationKernelType.EXPONENTIAL else (n / tau_s) * np.exp(-n / tau_s)
+    if normalize:
+        kernel = kernel / tau_s
+    return np.stack([np.convolve(events[:, c], kernel)[: len(n)] for c in range(events.shape[1])], axis=1)
+
+
+class TestMaxAggregation:
+    """MAX is the largest activation at any sample of the bin, chunked or not."""
+
+    FS = 1000.0
+    SPB = 10  # bin_duration * FS
+
+    def _events(self, scale_by_value: bool) -> np.ndarray:
+        rng = np.random.default_rng(3)
+        events = (rng.random((200, 2)) < 0.04).astype(float)
+        if scale_by_value:
+            events *= rng.normal(size=events.shape)  # mixed signs: the max may sit at a bin's end
+        return events
+
+    def _proc(self, kernel_type, scale_by_value=False, normalize=False):
+        return BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=kernel_type,
+                tau=0.008,
+                bin_duration=self.SPB / self.FS,
+                aggregation=BinAggregation.MAX,
+                scale_by_value=scale_by_value,
+                normalize=normalize,
+            )
+        )
+
+    def _msg(self, data, offset_samples: int, dense: bool) -> AxisArray:
+        return AxisArray(
+            data=data if dense else sparse.COO.from_numpy(data),
+            dims=["time", "ch"],
+            axes={"time": AxisArray.TimeAxis(fs=self.FS, offset=offset_samples / self.FS)},
+        )
+
+    def _run(self, proc, events, chunk: int, dense: bool) -> np.ndarray:
+        outs = [proc(self._msg(events[i : i + chunk], i, dense)).data for i in range(0, events.shape[0], chunk)]
+        return np.concatenate(outs, axis=0)
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    @pytest.mark.parametrize("dense", [False, True], ids=["sparse", "dense"])
+    @pytest.mark.parametrize("chunk", [200, 7, 23], ids=["one_chunk", "sub_bin_chunks", "chunks_across_bins"])
+    @pytest.mark.parametrize("scale_by_value", [False, True], ids=["count", "weighted"])
+    def test_matches_dense_reference(self, kernel_type, dense, chunk, scale_by_value):
+        events = self._events(scale_by_value)
+        ref = _kernel_reference(events, kernel_type, 0.008, self.FS, normalize=True)
+        expected = ref.reshape(-1, self.SPB, ref.shape[1]).max(axis=1)
+        out = self._run(self._proc(kernel_type, scale_by_value, normalize=True), events, chunk, dense)
+        np.testing.assert_allclose(out, expected, rtol=1e-9, atol=1e-12)
+
+    def test_mlx_dense_input_matches_numpy(self):
+        mx = pytest.importorskip("mlx.core")
+        events = self._events(False)
+        out_np = self._proc(ActivationKernelType.ALPHA)(self._msg(events, 0, dense=True)).data
+        out_mx = self._proc(ActivationKernelType.ALPHA)(self._msg(mx.array(events), 0, dense=True)).data
+        np.testing.assert_allclose(np.asarray(out_mx), out_np, rtol=1e-6)
+
+    def test_count_kernel_refuses_max(self):
+        with pytest.raises(ValueError, match="MAX"):
+            self._proc(ActivationKernelType.COUNT)(self._msg(self._events(False), 0, dense=False))
+
+
 class TestAlphaIsExact:
     """The alpha activation is (t/tau) exp(-t/tau) whatever the bin width it is sampled at."""
 
