@@ -119,7 +119,7 @@ class BinnedKernelActivationState:
     """MAX aggregation: the largest activation so far in the open bin, per channel."""
 
     bin_sum: npt.NDArray[np.float64] | None = None
-    """SUM with a kernel: the activation summed over the open bin's samples so far, per channel."""
+    """SUM or MEAN with a kernel: the activation summed over the open bin's samples so far, per channel."""
 
 
 class BinnedKernelActivation(
@@ -282,8 +282,10 @@ class BinnedKernelActivation(
         self._decay_to_sample(channel, target_sample)
 
     def _kernel_sum(self) -> bool:
+        """SUM or MEAN with a kernel: both run on ``bin_sum`` (MEAN divides it by the bin's sample count)."""
         return (
-            self.settings.aggregation == BinAggregation.SUM and self.settings.kernel_type != ActivationKernelType.COUNT
+            self.settings.aggregation in (BinAggregation.SUM, BinAggregation.MEAN)
+            and self.settings.kernel_type != ActivationKernelType.COUNT
         )
 
     def _track_sum(self, channel: int, target_sample: int) -> None:
@@ -398,7 +400,10 @@ class BinnedKernelActivation(
         output = np.zeros((n_bins, n_channels), dtype=np.float64)
         event_idx = 0
 
-        if self.settings.aggregation == BinAggregation.LAST:
+        # COUNT has no decay, so its MEAN reads the same running count as LAST.
+        if self.settings.aggregation == BinAggregation.LAST or (
+            self.settings.aggregation == BinAggregation.MEAN and self.settings.kernel_type == ActivationKernelType.COUNT
+        ):
             # For LAST aggregation, process events up to each bin end
             for bin_idx, bin_end in enumerate(bin_ends):
                 bin_end_sample = int(bin_end)
@@ -425,6 +430,9 @@ class BinnedKernelActivation(
                     self._track_sum(ch, bin_end_sample - 1)
                 output[bin_idx] = self._state.bin_sum
                 self._state.bin_sum = np.zeros(n_channels)
+            if self.settings.aggregation == BinAggregation.MEAN:
+                # Each bin's actual sample count (fractional bins differ by one; the first includes the carry).
+                output /= np.maximum(np.diff(step.cut_points, prepend=0), 1)[:, None]
 
         elif self.settings.aggregation == BinAggregation.SUM:
             # For SUM, accumulate within each bin
@@ -448,27 +456,6 @@ class BinnedKernelActivation(
                     event_idx += 1
 
                 output[bin_idx] = bin_sum
-
-        elif self.settings.aggregation == BinAggregation.MEAN:
-            # For MEAN with kernel, we'd need to integrate activation over bin
-            # Approximate with samples at bin start and end
-            bin_start = 0
-            for bin_idx, bin_end in enumerate(bin_ends):
-                bin_end_sample = int(bin_end)
-
-                # Process events up to bin end
-                while event_idx < len(events) and events[event_idx][0] < bin_end_sample:
-                    sample, channel, value = events[event_idx]
-                    self._add_event(channel, sample, value)
-                    event_idx += 1
-
-                # For exponential kernel, mean over [t0, t1] can be computed analytically
-                # For simplicity, use midpoint approximation
-                midpoint = (bin_start + bin_end_sample) // 2
-                for ch in range(n_channels):
-                    output[bin_idx, ch] = self._get_activation_at_sample(ch, midpoint)
-
-                bin_start = bin_end_sample
 
         elif self.settings.aggregation == BinAggregation.MAX:
             # `_add_event` folds every sample up to and including each event into `bin_max`;

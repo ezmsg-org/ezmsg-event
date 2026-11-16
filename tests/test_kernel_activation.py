@@ -619,3 +619,34 @@ class TestKernelSum:
             rtol=1e-9,
             atol=1e-12,
         )
+
+
+class TestKernelMean(TestKernelSum):
+    """MEAN with a kernel is the per-sample activation averaged over each bin's samples."""
+
+    AGGREGATION = BinAggregation.MEAN
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    @pytest.mark.parametrize("scale_by_value", [False, True], ids=["count", "weighted"])
+    @pytest.mark.parametrize("bin_duration", [0.010, 0.0075], ids=["whole", "fractional"])
+    def test_matches_dense_reference(self, kernel_type, scale_by_value, bin_duration):
+        rng = np.random.default_rng(7)
+        events = (rng.random((200, 2)) < 0.05).astype(float)
+        if scale_by_value:
+            events *= rng.normal(size=events.shape)
+        ref = _kernel_reference(events, kernel_type, 0.008, self.FS, normalize=True)
+        # Fractional 7.5-sample bins end at floor(7.5 * k): widths alternate 7 and 8.
+        ends = np.floor(np.arange(1, 200 / (bin_duration * self.FS) + 1) * bin_duration * self.FS + 1e-9).astype(int)
+        ends = ends[ends <= 200]
+        assert set(np.diff(ends)) == ({10} if bin_duration == 0.010 else {7, 8})
+        starts = np.concatenate(([0], ends[:-1]))
+        expected = np.stack([ref[a:b].mean(axis=0) for a, b in zip(starts, ends)])
+        out = self._run(kernel_type, events, [200], bin_duration, scale_by_value=scale_by_value)
+        np.testing.assert_allclose(out, expected, rtol=1e-9, atol=1e-12)
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    def test_irregular_chunks_match_dense_reference(self, kernel_type):
+        events = (np.random.default_rng(8).random((200, 2)) < 0.05).astype(float)
+        ref = _kernel_reference(events, kernel_type, 0.008, self.FS, normalize=True)
+        out = self._run(kernel_type, events, [3, 1, 4, 1, 5, 9, 2, 6, 25, 3, 50, 7, 1, 83])
+        np.testing.assert_allclose(out, ref.reshape(-1, 10, 2).mean(axis=1), rtol=1e-9, atol=1e-12)
