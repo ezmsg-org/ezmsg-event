@@ -212,7 +212,8 @@ class ThresholdCrossingTransformer(
         # _state.data carries the previous chunk's last sample as the over/under reference.
         # _reset_state seeded it with this stream's first sample, so the kernel will treat
         # the first sample as never-a-crossing, matching the cpu path's convention.
-        prev_sample = self._state.data[0]
+        # After a reset on an empty message there is no previous sample: use this chunk's first.
+        prev_sample = self._state.data[0] if self._state.data.shape[0] else message.data[0]
         events, last_sample, elapsed_out = threshold_crossings_mlx_metal(
             message.data,
             prev_sample,
@@ -287,12 +288,9 @@ class ThresholdCrossingTransformer(
         # (the cpu path's prepended buffer alone yields no new crossings, and the metal
         # kernel has nothing to scan). Short-circuit before backend dispatch.
         if message.data.shape[0] == 0:
-            # _hash_message ignores the sample count, so an empty first chunk still triggers
-            # _reset_state, which seeds _state.data from data[:1] -> an empty time axis. Force
-            # a re-reset so the first non-empty chunk seeds the prev-sample reference (the
-            # metal path indexes _state.data[0], and the cpu path prepends it).
-            if self._state.data is not None and self._state.data.shape[0] == 0:
-                self._request_reset()
+            # A reset on an empty message (e.g. an end-of-stream marker starting a new segment)
+            # leaves `_state.data` empty; the next chunk then takes its own first sample as the
+            # reference. Not a re-reset: that would also drop the scaler `_reset_segment` keeps.
             return self._empty_output(message, xp)
 
         # MLX-on-device fast path: bypass the numpy event-detection logic and run
@@ -317,9 +315,9 @@ class ThresholdCrossingTransformer(
 
         if n_prepended == 0:
             # No reference sample from previous iteration (e.g. first message after an empty-data reset).
-            # Duplicate the first sample as the reference, matching the convention that _reset_state
-            # stores data[:1] so it gets prepended on the next call.
-            data = xp.concat((data[:1], data), axis=0)
+            # Use what _reset_state would have stored: the first sample, or zeros when scaling.
+            ref = data[:1] if self._state.scaler is None else xp.zeros_like(data[:1])
+            data = xp.concat((ref, data), axis=0)
             n_prepended = 1
             if self._state.data_raw is not None:
                 self._state.data_raw = xp.concat((self._state.data_raw[:1], self._state.data_raw), axis=0)

@@ -186,3 +186,15 @@ class TestKernelInserterTail:
         full = np.concatenate([o.data[:, 0] for o in outs])
         np.testing.assert_array_equal(full[8:13], [1.0, 2.0, 3.0, 4.0, 5.0])
         assert full.sum() == 15.0
+
+
+def test_threshold_scaler_survives_an_end_of_stream_marker():
+    """`_reset_segment` keeps the scaler; a reset on the empty marker must not then force a full one."""
+    proc = ThresholdCrossingTransformer(ThresholdSettings(threshold=3.0, auto_scale_tau=0.5))
+    first = _signal()
+    proc(first)
+    scaler = proc.state.scaler
+    marker = end_of_stream(first)
+    proc(marker)
+    proc(replace(_signal(seed=1, offset=5.0), segment=marker.segment + 1))
+    assert proc.state.scaler is scaler
