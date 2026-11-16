@@ -108,10 +108,8 @@ class RefractoryTransformer(BaseStatefulTransformer[RefractorySettings, AxisArra
             out_coords[d] = cross_idx[i]
         out_coords[ax_idx] = cross_idx[-1]
 
-        # Get the values for kept events
-        kept_mask = np.ones(coords.shape[1], dtype=bool)
-        kept_mask[sort_order[final_drop]] = False
-        result_data = message.data.data[kept_mask]
+        # The values, sorted and filtered exactly as the coordinates were, so each stays with its event.
+        result_data = np.delete(message.data.data[sort_order], final_drop)
 
         result = sparse.COO(
             out_coords,
