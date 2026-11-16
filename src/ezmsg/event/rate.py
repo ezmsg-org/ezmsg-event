@@ -24,7 +24,7 @@ class Rate(BinnedKernelActivation):
     """
     Event rate calculator (events per second).
 
-    Counts events per bin and divides by bin_duration to get rate in events/second.
+    Counts events per bin and divides by that bin's actual duration to get rate in events/second.
     """
 
     def __init__(self, settings: EventRateSettings) -> None:

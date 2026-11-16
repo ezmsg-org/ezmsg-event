@@ -80,8 +80,9 @@ class BinnedKernelActivationSettings(ez.Settings):
 
     rate_normalize: bool = False
     """If True, divide output by the bin's duration to get events/second (for COUNT
-    kernel). The divisor is the *actual* bin duration (``samples_per_bin / fs``),
-    which equals ``bin_duration`` exactly in fractional mode."""
+    kernel). The divisor is each bin's *actual* duration (its sample count / fs):
+    with ``fractional=True`` bin widths differ by a sample, so it is not exactly
+    ``bin_duration``, and with ``fractional=False`` it is ``int(bin_duration * fs) / fs``."""
 
     fractional: bool = True
     """If True (default), bins span a *fractional* ``bin_duration * fs`` samples
@@ -480,10 +481,9 @@ class BinnedKernelActivation(
         # Update state sample counters relative to next chunk
         self._state.samples_since_update -= n_samples
 
-        # Apply rate normalization if requested (divide by the bin's actual
-        # duration to get events/second; == bin_duration in fractional mode).
+        # Apply rate normalization if requested: each bin over its own duration, in events/second.
         if self.settings.rate_normalize:
-            output = output / step.output_gain
+            output = output / self._bin_durations(step, output.ndim)
 
         return replace(
             message,
@@ -496,6 +496,15 @@ class BinnedKernelActivation(
                 ),
             },
         )
+
+    def _bin_durations(self, step, ndim: int) -> npt.NDArray[np.float64]:
+        """Each closed bin's actual duration (its sample count / fs), shaped to divide a stream-first output.
+
+        Fractional bins differ by a sample, and a sample-locked bin is not ``bin_duration`` long either.
+        """
+        # A bin with no samples (bin_duration under one sample) holds a count of 0; keep it 0, not NaN.
+        widths = np.maximum(np.diff(step.cut_points, prepend=0), 1)
+        return (widths / self._state.fs).reshape((-1,) + (1,) * (ndim - 1))
 
     def _process_dense_count_sum(self, message: AxisArray) -> AxisArray:
         """Fast path: dense input + COUNT kernel + SUM aggregation.
@@ -612,7 +621,7 @@ class BinnedKernelActivation(
         self._state.dense_carry = new_overflow
 
         if self.settings.rate_normalize:
-            output = output / step.output_gain
+            output = output / xp.asarray(self._bin_durations(step, output.ndim), dtype=output.dtype)
 
         return replace(
             message,

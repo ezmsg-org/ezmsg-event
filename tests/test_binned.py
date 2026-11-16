@@ -279,3 +279,30 @@ class TestTheAxisSettingIsDeprecated:
             a = explicit(self._msg())
             b = implicit(self._msg())
         assert np.array_equal(a.data, b.data)
+
+
+@pytest.mark.parametrize("fractional", [False, True])
+@pytest.mark.parametrize("chunk", [400, 7])
+def test_rate_divides_each_bin_by_its_actual_width(fractional: bool, chunk: int):
+    """12.5 ms at 1 kHz is not a whole number of samples: sample-locked bins hold 12 samples
+    (12 ms, not 12.5) and fractional bins alternate 12 and 13. An event at every sample is
+    1000 events/s, which every bin must report."""
+    fs = 1000.0
+    events = np.ones((400, 2))
+    events[:, 1] = 0.0
+    proc = BinnedEventAggregator(BinnedEventAggregatorSettings(bin_duration=0.0125, fractional=fractional))
+    out = np.concatenate(
+        [
+            proc(
+                AxisArray(
+                    data=sparse.COO.from_numpy(events[i : i + chunk]),
+                    dims=["time", "ch"],
+                    axes={"time": AxisArray.TimeAxis(fs=fs, offset=i / fs)},
+                )
+            ).data
+            for i in range(0, events.shape[0], chunk)
+        ]
+    )
+    assert out.shape[0] > 20
+    np.testing.assert_allclose(out[:, 0], 1000.0)
+    np.testing.assert_array_equal(out[:, 1], 0.0)
