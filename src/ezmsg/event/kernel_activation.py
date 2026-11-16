@@ -118,6 +118,9 @@ class BinnedKernelActivationState:
     bin_max: npt.NDArray[np.float64] | None = None
     """MAX aggregation: the largest activation so far in the open bin, per channel."""
 
+    bin_sum: npt.NDArray[np.float64] | None = None
+    """SUM with a kernel: the activation summed over the open bin's samples so far, per channel."""
+
 
 class BinnedKernelActivation(
     BaseStatefulTransformer[
@@ -176,6 +179,7 @@ class BinnedKernelActivation(
         # -1: the state describes the instant before the first sample, so MAX sees sample 0 too.
         self._state.samples_since_update = np.full(n_channels, -1, dtype=np.int64)
         self._state.bin_max = np.full(n_channels, -np.inf)
+        self._state.bin_sum = np.zeros(n_channels)
 
         # For alpha kernel, we need auxiliary state
         if self.settings.kernel_type == ActivationKernelType.ALPHA:
@@ -227,6 +231,10 @@ class BinnedKernelActivation(
         max_agg = self.settings.aggregation == BinAggregation.MAX
         if max_agg:
             self._track_max(channel, sample - 1)
+        sum_agg = self._kernel_sum()
+        if sum_agg:
+            # Fold samples up to and including this one, before the event; its own k(0) is added below.
+            self._track_sum(channel, sample)
         # First decay to event time
         self._decay_to_sample(channel, sample)
 
@@ -238,6 +246,8 @@ class BinnedKernelActivation(
 
         if self.settings.kernel_type == ActivationKernelType.EXPONENTIAL:
             self._state.activation[channel] += weight
+            if sum_agg:
+                self._state.bin_sum[channel] += weight  # k(0) = 1 at the event's own sample (alpha's is 0)
 
         elif self.settings.kernel_type == ActivationKernelType.ALPHA:
             # For alpha kernel, event adds to auxiliary state
@@ -269,6 +279,33 @@ class BinnedKernelActivation(
         ks = np.clip(ks, 1, n)
         values = (a + u * ks / tau_samples) * np.exp(-ks / tau_samples)
         self._state.bin_max[channel] = max(self._state.bin_max[channel], values.max())
+        self._decay_to_sample(channel, target_sample)
+
+    def _kernel_sum(self) -> bool:
+        return (
+            self.settings.aggregation == BinAggregation.SUM and self.settings.kernel_type != ActivationKernelType.COUNT
+        )
+
+    def _track_sum(self, channel: int, target_sample: int) -> None:
+        """Add the activation at samples (last update, target] to ``bin_sum``, then decay to target.
+
+        With no event in between, the activation ``k`` samples on is ``(a + u*k/tau) * r**k`` with
+        ``r = exp(-1/tau)``, so the sum over ``k = 1..n`` is ``a*S0 + (u/tau)*S1`` with the geometric
+        sums ``S0 = sum r**k`` and ``S1 = sum k*r**k`` in closed form.
+        """
+        n = target_sample - self._state.samples_since_update[channel]
+        if n <= 0:
+            return
+        tau_samples = self.settings.tau * self._state.fs
+        a = self._state.activation[channel]
+        u = self._state.alpha_aux[channel] if self.settings.kernel_type == ActivationKernelType.ALPHA else 0.0
+        r = math.exp(-1.0 / tau_samples)
+        q = -math.expm1(-1.0 / tau_samples)  # 1 - r, without cancellation for long tau
+        rn = math.exp(-n / tau_samples)
+        one_minus_rn = -math.expm1(-n / tau_samples)
+        s0 = r * one_minus_rn / q
+        s1 = r * (one_minus_rn - n * rn * q) / (q * q)
+        self._state.bin_sum[channel] += a * s0 + u * s1 / tau_samples
         self._decay_to_sample(channel, target_sample)
 
     def _get_activation_at_sample(self, channel: int, sample: int) -> float:
@@ -375,6 +412,19 @@ class BinnedKernelActivation(
                 # Record activation at bin end for each channel
                 for ch in range(n_channels):
                     output[bin_idx, ch] = self._get_activation_at_sample(ch, bin_end_sample)
+
+        elif self._kernel_sum():
+            # Like MAX: `_add_event` folds samples up to each event into `bin_sum`, the rest at the bin's end.
+            for bin_idx, bin_end in enumerate(bin_ends):
+                bin_end_sample = int(bin_end)
+                while event_idx < len(events) and events[event_idx][0] < bin_end_sample:
+                    sample, channel, value = events[event_idx]
+                    self._add_event(channel, sample, value)
+                    event_idx += 1
+                for ch in range(n_channels):
+                    self._track_sum(ch, bin_end_sample - 1)
+                output[bin_idx] = self._state.bin_sum
+                self._state.bin_sum = np.zeros(n_channels)
 
         elif self.settings.aggregation == BinAggregation.SUM:
             # For SUM, accumulate within each bin

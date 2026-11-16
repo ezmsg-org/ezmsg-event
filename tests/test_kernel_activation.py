@@ -562,3 +562,60 @@ def test_last_is_chunk_invariant_with_sub_bin_chunks(kernel_type):
         )
 
     np.testing.assert_allclose(run(7), run(200), rtol=1e-9)
+
+
+class TestKernelSum:
+    """SUM with a kernel is the per-sample activation summed over each bin's samples."""
+
+    FS = 1000.0
+
+    AGGREGATION = BinAggregation.SUM
+
+    def _run(self, kernel_type, events, chunks, bin_duration=0.010, scale_by_value=False) -> np.ndarray:
+        proc = BinnedKernelActivation(
+            BinnedKernelActivationSettings(
+                kernel_type=kernel_type,
+                tau=0.008,
+                bin_duration=bin_duration,
+                aggregation=self.AGGREGATION,
+                scale_by_value=scale_by_value,
+            )
+        )
+        starts = np.cumsum([0, *chunks])
+        assert starts[-1] == events.shape[0]
+        outs = [
+            proc(
+                AxisArray(
+                    sparse.COO.from_numpy(events[a:b]),
+                    dims=["time", "ch"],
+                    axes={"time": AxisArray.TimeAxis(fs=self.FS, offset=a / self.FS)},
+                )
+            ).data
+            for a, b in zip(starts[:-1], starts[1:])
+        ]
+        return np.concatenate(outs, axis=0)
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    @pytest.mark.parametrize("scale_by_value", [False, True], ids=["count", "weighted"])
+    def test_matches_dense_reference(self, kernel_type, scale_by_value):
+        rng = np.random.default_rng(7)
+        events = (rng.random((200, 2)) < 0.05).astype(float)
+        if scale_by_value:
+            events *= rng.normal(size=events.shape)
+        ref = _kernel_reference(events, kernel_type, 0.008, self.FS, normalize=True)
+        expected = ref.reshape(-1, 10, 2).sum(axis=1)
+        out = self._run(kernel_type, events, [200], scale_by_value=scale_by_value)
+        np.testing.assert_allclose(out, expected, rtol=1e-9, atol=1e-12)
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    @pytest.mark.parametrize("bin_duration", [0.010, 0.0075], ids=["whole", "fractional"])
+    def test_irregular_chunks_match_one_chunk(self, kernel_type, bin_duration):
+        """Chunks shorter than a bin, and bins split over several chunks, lose no events."""
+        events = (np.random.default_rng(8).random((200, 2)) < 0.05).astype(float)
+        chunks = [3, 1, 4, 1, 5, 9, 2, 6, 25, 3, 50, 7, 1, 83]
+        np.testing.assert_allclose(
+            self._run(kernel_type, events, chunks, bin_duration),
+            self._run(kernel_type, events, [200], bin_duration),
+            rtol=1e-9,
+            atol=1e-12,
+        )
