@@ -28,7 +28,8 @@ def make_sparse_message(
 
     data = sparse.COO(
         coords=coords_array,
-        data=np.array(values),
+        # An empty list would default to float64, a dtype change (hence a reset) from int events.
+        data=np.array(values) if values else np.array([], dtype=int),
         shape=shape,
     )
 

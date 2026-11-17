@@ -25,6 +25,7 @@ import sparse
 from array_api_compat import get_namespace, is_numpy_array
 from ezmsg.baseproc import BaseStatefulTransformer, BaseTransformerUnit, processor_state, resolve_stream_dim
 from ezmsg.sigproc.util.binning import BinSchedule
+from ezmsg.sigproc.util.segment import ConfigChain
 from ezmsg.util.messages.axisarray import AxisArray, replace
 
 
@@ -116,6 +117,9 @@ class BinnedKernelActivationState:
     # ezmsg-sigproc dense binner uses, so both land on an identical grid.
     schedule: BinSchedule | None = None
 
+    configs: ConfigChain | None = None
+    """Derives the output's config_id (dense, binned) from the input's."""
+
     axis: str = ""
     """The resolved stream dimension, fixed at reset so every later use agrees."""
 
@@ -124,6 +128,15 @@ class BinnedKernelActivationState:
 
     bin_sum: npt.NDArray[np.float64] | None = None
     """SUM or MEAN with a kernel: the activation summed over the open bin's samples so far, per channel."""
+
+    template: AxisArray | None = None
+    """The input's layout with no samples, taken at reset. `flush` labels the partial rate bin from it."""
+
+    next_offset: float = 0.0
+    """Time offset just past the last input sample."""
+
+    last_attrs: dict | None = None
+    """The last input's attrs, which can change without a reset; `flush` gives them to the partial bin."""
 
 
 class BinnedKernelActivation(
@@ -153,19 +166,6 @@ class BinnedKernelActivation(
         - Supports exponential, alpha, and count kernels
         - Configurable bin aggregation (last, mean, sum, max)
     """
-
-    def _hash_message(self, message: AxisArray) -> int:
-        # The base class covers the key, the dims, the channel count and the
-        # sample rate. Two things it cannot see are added here:
-        #   dtype   -- `str()` rather than `.kind`, which mlx arrays do not expose.
-        #   backend -- the per-channel state is numpy either way, but the code
-        #              paths that fill it differ between sparse, numpy and mlx.
-        # Folding in the key is new, and is the point: `activation`,
-        # `dense_carry` and `samples_since_update` are per-channel running state,
-        # so carrying them into a different stream is the same failure as a
-        # filter keeping the previous device's history.
-        backend = "sparse" if isinstance(message.data, sparse.SparseArray) else get_namespace(message.data).__name__
-        return self._message_hash(message, extra=(str(message.data.dtype), backend))
 
     def _reset_state(self, message: AxisArray) -> None:
         """Initialize state for new input stream."""
@@ -202,6 +202,19 @@ class BinnedKernelActivation(
         # tracks the nominal bin_duration, sample-locked mode matches Window's grid.
         self._state.schedule = BinSchedule(bin_duration=self.settings.bin_duration, fractional=self.settings.fractional)
         self._state.schedule.reset(self._state.fs)
+
+        # Output: dense bins at the schedule's gain. Dense COUNT+SUM input stays float32 in its own
+        # namespace (`_process_dense_count_sum`); everything else comes out as numpy float64.
+        dense_count_sum = (
+            not isinstance(message.data, sparse.SparseArray)
+            and self.settings.kernel_type == ActivationKernelType.COUNT
+            and self.settings.aggregation == BinAggregation.SUM
+        )
+        out_dtype = "float32" if dense_count_sum else "float64"
+        self._state.configs = ConfigChain(axis, self._state.schedule.output_gain, out_dtype)
+        self._state.template = replace(
+            message, data=np.zeros(tuple(0 if i == ax else n for i, n in enumerate(message.data.shape)))
+        )
 
     def _decay_to_sample(self, channel: int, target_sample: int) -> None:
         """
@@ -337,6 +350,8 @@ class BinnedKernelActivation(
         """
         axis = self._state.axis
         ax = message.get_axis_idx(axis)
+        self._state.next_offset = message.axes[axis].value(message.data.shape[ax])
+        self._state.last_attrs = message.attrs
         if ax == 0:
             return self._process_stream_first(message)
         perm = (ax, *(i for i in range(message.data.ndim) if i != ax))
@@ -396,6 +411,7 @@ class BinnedKernelActivation(
                     **message.axes,
                     axis: replace(message.axes[axis], gain=step.output_gain),
                 },
+                config_id=self._state.configs.update(message.config_id),
             )
 
         # Bin ends in input samples relative to *this chunk's* start. The schedule
@@ -516,6 +532,7 @@ class BinnedKernelActivation(
                     offset=step.output_offset,
                 ),
             },
+            config_id=self._state.configs.update(message.config_id),
         )
 
     def _bin_durations(self, step, ndim: int) -> npt.NDArray[np.float64]:
@@ -575,6 +592,7 @@ class BinnedKernelActivation(
                     **message.axes,
                     axis: replace(message.axes[axis], gain=step.output_gain),
                 },
+                config_id=self._state.configs.update(message.config_id),
             )
 
         # Bin boundaries in this chunk's sample space, from the shared schedule
@@ -655,7 +673,58 @@ class BinnedKernelActivation(
                     offset=step.output_offset,
                 ),
             },
+            config_id=self._state.configs.update(message.config_id),
         )
+
+    def flush(self, message: AxisArray | None = None) -> AxisArray | None:
+        """Process ``message`` if given, then emit the open partial bin if it is a rate or a MAX.
+
+        A rate is the partial bin's count divided by its actual duration; a MAX is the largest
+        activation over the samples the bin got. The sample is labelled with that bin's place on
+        the grid and the old stream's segment, config_id and attrs. Nothing is emitted for an
+        empty partial bin. After emitting, the next message starts a fresh grid. When nothing is
+        emitted the state is left alone: the new segment or config_id that prompts a flush resets it.
+        """
+        out = None if message is None else self(message)
+        st, s = self._state, self.settings
+        # Other partial count or activation bins are dropped at a gap: only a rate or a max
+        # (mean-like, as in ezmsg-sigproc's BinnedAggregate) is comparable with full bins.
+        is_rate = (
+            s.kernel_type == ActivationKernelType.COUNT and s.aggregation == BinAggregation.SUM and s.rate_normalize
+        )
+        is_max = s.aggregation == BinAggregation.MAX
+        if not (is_rate or is_max) or st.schedule is None or st.schedule.carry_count == 0:
+            return out
+        if is_rate:
+            counts = st.activation if st.dense_carry is None else st.dense_carry
+            value = (counts * (st.fs / st.schedule.carry_count))[None, ...]
+        else:
+            # Fold in the samples after the last event, up to the last one received (-1 relative to the next chunk).
+            for ch in range(len(st.bin_max)):
+                self._track_max(ch, -1)
+            value = st.bin_max[None, :].copy()
+        # No new samples: closes no bin, only reports where the open one sits.
+        step = st.schedule.advance(n_new=0, in_offset=st.next_offset, gain_in=1.0 / st.fs)
+        template = st.template
+        ax = template.get_axis_idx(st.axis)
+        if ax != 0:
+            perm = (ax, *(i for i in range(template.data.ndim) if i != ax))
+            value = value.transpose(tuple(np.argsort(perm)))
+        tail = replace(
+            template,
+            data=value,
+            axes={**template.axes, st.axis: AxisArray.TimeAxis(fs=1.0 / step.output_gain, offset=step.output_offset)},
+            attrs=st.last_attrs,
+            config_id=st.configs.config_id,
+        )
+        st.activation[:] = 0.0
+        st.bin_max[:] = -np.inf
+        st.dense_carry = None
+        st.schedule.reset(st.fs)
+        self._request_reset()
+        if out is None or out.data.shape[ax] == 0:
+            return tail
+        return replace(out, data=get_namespace(out.data).concat((out.data, tail.data), axis=ax))
 
 
 class BinnedKernelActivationUnit(

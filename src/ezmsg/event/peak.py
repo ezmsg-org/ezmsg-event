@@ -27,6 +27,7 @@ from ezmsg.baseproc import (
     suppress_axis_deprecation,
 )
 from ezmsg.sigproc.scaler import AdaptiveStandardScalerTransformer
+from ezmsg.sigproc.util.segment import ConfigChain
 from ezmsg.util.messages.axisarray import AxisArray, replace  # slice_along_axis,
 
 
@@ -102,6 +103,9 @@ class ThresholdCrossingState:
     Lives in the input's namespace: numpy (flat ``(prod(features),)``) for the cpu
     event-loop path, MLX (shape ``(*features,)``) for the on-device Metal path."""
 
+    configs: ConfigChain | None = None
+    """Derives the output's config_id (event container and dtype) from the input's."""
+
     axis: str = ""
     """The resolved stream dimension, fixed at reset so every later use agrees."""
 
@@ -113,6 +117,8 @@ class ThresholdCrossingTransformer(
 
     The output has the stream dimension first, whatever the input's layout.
     """
+
+    # No `flush`: an event still waiting for its look-ahead at a gap is dropped, like a partial window.
 
     def _reset_state(self, message: AxisArray) -> None:
         """Reset the state variables."""
@@ -163,6 +169,13 @@ class ThresholdCrossingTransformer(
             n_features = math.prod(feature_shape) if feature_shape else 1
             self._state.elapsed = np.full((n_features,), self._state.refrac_width + 1, dtype=np.int32)
 
+        # The output container and dtype follow from these settings and the input's layout.
+        self._state.configs = ConfigChain(
+            self.settings.output_format.value,
+            self.settings.return_peak_val,
+            self._can_use_mlx_metal(xp, message.data),
+        )
+
     def _reset_segment(self, message: AxisArray) -> None:
         """A new segment drops the trailing samples and refractory counts, which belong to
         the samples before the gap, but keeps the scaler: its running statistics describe
@@ -201,7 +214,8 @@ class ThresholdCrossingTransformer(
         # _state.data carries the previous chunk's last sample as the over/under reference.
         # _reset_state seeded it with this stream's first sample, so the kernel will treat
         # the first sample as never-a-crossing, matching the cpu path's convention.
-        prev_sample = self._state.data[0]
+        # After a reset on an empty message there is no previous sample: use this chunk's first.
+        prev_sample = self._state.data[0] if self._state.data.shape[0] else message.data[0]
         events, last_sample, elapsed_out = threshold_crossings_mlx_metal(
             message.data,
             prev_sample,
@@ -217,13 +231,15 @@ class ThresholdCrossingTransformer(
         """Build the output AxisArray, shifting the time offset if the result begins
         earlier than the input chunk (the cpu path can hold back unfinished events
         from the previous chunk into this output)."""
+        config_id = self._state.configs.update(message.config_id)
         if t0_offset_samples == 0:
-            return replace(message, data=data)
+            return replace(message, data=data, config_id=config_id)
         axis = self._state.axis
         time_axis = message.axes[axis]
         return replace(
             message,
             data=data,
+            config_id=config_id,
             axes={
                 **message.axes,
                 axis: replace(time_axis, offset=time_axis.offset + t0_offset_samples * time_axis.gain),
@@ -236,7 +252,7 @@ class ThresholdCrossingTransformer(
         if self._can_use_mlx_metal(xp, message.data):
             import mlx.core as mx
 
-            return replace(message, data=mx.zeros((0,) + feature_shape, dtype=mx.int8))
+            return self._wrap_output(message, mx.zeros((0,) + feature_shape, dtype=mx.int8))
         out_dtype = message.data.dtype if self.settings.return_peak_val else bool
         if self.settings.output_format == OutputFormat.SPARSE:
             data = sparse.COO(
@@ -246,7 +262,7 @@ class ThresholdCrossingTransformer(
             )
         else:
             data = xp.zeros(message.data.shape, dtype=out_dtype)
-        return replace(message, data=data)
+        return self._wrap_output(message, data)
 
     def _process(self, message: AxisArray) -> AxisArray:
         """
@@ -274,12 +290,9 @@ class ThresholdCrossingTransformer(
         # (the cpu path's prepended buffer alone yields no new crossings, and the metal
         # kernel has nothing to scan). Short-circuit before backend dispatch.
         if message.data.shape[0] == 0:
-            # _hash_message ignores the sample count, so an empty first chunk still triggers
-            # _reset_state, which seeds _state.data from data[:1] -> an empty time axis. Force
-            # a re-reset so the first non-empty chunk seeds the prev-sample reference (the
-            # metal path indexes _state.data[0], and the cpu path prepends it).
-            if self._state.data is not None and self._state.data.shape[0] == 0:
-                self._request_reset()
+            # A reset on an empty message (e.g. an end-of-stream marker starting a new segment)
+            # leaves `_state.data` empty; the next chunk then takes its own first sample as the
+            # reference. Not a re-reset: that would also drop the scaler `_reset_segment` keeps.
             return self._empty_output(message, xp)
 
         # MLX-on-device fast path: bypass the numpy event-detection logic and run
@@ -304,9 +317,9 @@ class ThresholdCrossingTransformer(
 
         if n_prepended == 0:
             # No reference sample from previous iteration (e.g. first message after an empty-data reset).
-            # Duplicate the first sample as the reference, matching the convention that _reset_state
-            # stores data[:1] so it gets prepended on the next call.
-            data = xp.concat((data[:1], data), axis=0)
+            # Use what _reset_state would have stored: the first sample, or zeros when scaling.
+            ref = data[:1] if self._state.scaler is None else xp.zeros_like(data[:1])
+            data = xp.concat((ref, data), axis=0)
             n_prepended = 1
             if self._state.data_raw is not None:
                 self._state.data_raw = xp.concat((self._state.data_raw[:1], self._state.data_raw), axis=0)

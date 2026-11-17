@@ -118,6 +118,43 @@ class BinnedEventAggregator(BaseTransformer[BinnedEventAggregatorSettings, AxisA
             binned = replace(binned, data=binned.data / xp.asarray(durations.reshape(shape), dtype=binned.data.dtype))
         return binned
 
+    def flush(self, message: AxisArray | None = None) -> AxisArray | None:
+        """Process ``message`` if given, then emit the open partial bin if the output is a rate.
+
+        The binner's own ``flush`` drops a partial SUM bin, so this reads its carry: the count is
+        divided by the partial bin's actual duration and labelled with that bin's place on the grid
+        and the old stream's segment, config_id and attrs. The next message starts a fresh grid.
+        """
+        out = None if message is None else self(message)
+        st = self._binner.state
+        # A partial count bin (scale_output=False) is dropped at a gap: it is not comparable with full bins.
+        if not self.settings.scale_output or st.carry is None:
+            return out
+        template = replace(st.template, attrs=st.last_attrs)
+        ax = template.get_axis_idx(st.axis)
+        n = st.carry.shape[ax]
+        if n == 0:
+            return out
+        gain_in = template.axes[st.axis].gain
+        xp = get_namespace(st.carry)
+        rate = xp.sum(st.carry, axis=ax, keepdims=True) / (n * gain_in)
+        # No new samples: closes no bin, only reports where the open one sits.
+        step = st.schedule.advance(n_new=0, in_offset=st.next_offset, gain_in=gain_in)
+        tail = replace(
+            template,
+            data=rate,
+            axes={
+                **template.axes,
+                st.axis: replace(template.axes[st.axis], gain=step.output_gain, offset=step.output_offset),
+            },
+            config_id=st.configs.update(st.last_config_id),
+        )
+        st.carry = None
+        self._binner._request_reset()
+        if out is None or out.data.shape[ax] == 0:
+            return tail
+        return replace(out, data=xp.concat((out.data, tail.data), axis=ax))
+
 
 class BinnedEventAggregatorUnit(
     BaseTransformerUnit[BinnedEventAggregatorSettings, AxisArray, AxisArray, BinnedEventAggregator]

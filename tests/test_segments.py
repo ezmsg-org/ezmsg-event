@@ -6,22 +6,26 @@ neighbours, so nothing carried from before it (a tail of samples, a refractory c
 kernel's decaying activation, a partly filled bin) may leak across.
 """
 
+import asyncio
+
 import numpy as np
 import pytest
 import sparse
 from ezmsg.util.messages.axisarray import AxisArray, CoordinateAxis
 from ezmsg.util.messages.util import replace
 
-from ezmsg.event.binned import BinnedEventAggregator, BinnedEventAggregatorSettings
+from ezmsg.event.binned import BinnedEventAggregator, BinnedEventAggregatorSettings, BinnedEventAggregatorUnit
 from ezmsg.event.kernel import ArrayKernel
 from ezmsg.event.kernel_activation import (
     ActivationKernelType,
+    BinAggregation,
     BinnedKernelActivation,
     BinnedKernelActivationSettings,
+    BinnedKernelActivationUnit,
 )
 from ezmsg.event.kernel_insert import SparseKernelInserter, SparseKernelInserterSettings
 from ezmsg.event.peak import ThresholdCrossingTransformer, ThresholdSettings
-from ezmsg.event.rate import EventRateSettings, Rate
+from ezmsg.event.rate import EventRate, EventRateSettings, Rate
 from ezmsg.event.refractory import RefractorySettings, RefractoryTransformer
 
 FS = 30_000.0
@@ -146,3 +150,127 @@ def test_threshold_keeps_its_scale_estimate_across_a_segment():
     assert proc.state.scaler is scaler
     assert _dense_data(continued).sum() > 3 * _dense_data(fresh).sum()
     assert continued.segment == 1
+
+
+# --- At a gap, a partial bin is emitted only when the output is a rate. ---
+
+RATE_STAGES = {
+    "rate": lambda: Rate(EventRateSettings(bin_duration=0.02)),
+    "binned": lambda: BinnedEventAggregator(BinnedEventAggregatorSettings(bin_duration=0.02, scale_output=True)),
+    "kernel_activation": lambda: BinnedKernelActivation(
+        BinnedKernelActivationSettings(
+            kernel_type=ActivationKernelType.COUNT,
+            aggregation=BinAggregation.SUM,
+            bin_duration=0.02,
+            rate_normalize=True,  # normalize=True (the default) must not touch a count
+        )
+    ),
+}
+
+COUNT_STAGES = {
+    "binned_count": lambda: BinnedEventAggregator(BinnedEventAggregatorSettings(bin_duration=0.02, scale_output=False)),
+    "kernel_activation_count": lambda: BinnedKernelActivation(
+        BinnedKernelActivationSettings(
+            kernel_type=ActivationKernelType.COUNT, aggregation=BinAggregation.SUM, bin_duration=0.02
+        )
+    ),
+    "exponential_last": lambda: BinnedKernelActivation(BinnedKernelActivationSettings(bin_duration=0.02)),
+    "alpha_mean": lambda: BinnedKernelActivation(
+        BinnedKernelActivationSettings(
+            kernel_type=ActivationKernelType.ALPHA, aggregation=BinAggregation.MEAN, bin_duration=0.02
+        )
+    ),
+}
+
+SPB = 600  # 20 ms at FS; N_TIME = 700 leaves a 100-sample partial bin
+
+
+def _partial_bin_events(dense: bool, offset: float = 1.0, segment: int = 0) -> AxisArray:
+    data = np.zeros((N_TIME, len(LABELS)))
+    data[[10, 650, 660, 699], 0] = 1.0  # three in the partial bin
+    data[[620], 1] = 1.0  # one
+    return _msg(data if dense else sparse.COO.from_numpy(data), offset, segment)
+
+
+@pytest.mark.parametrize("dense", [False, True], ids=["sparse", "dense"])
+@pytest.mark.parametrize("name", RATE_STAGES)
+def test_flush_emits_a_partial_rate_bin(name, dense):
+    proc = RATE_STAGES[name]()
+    msg = _partial_bin_events(dense)
+    out = proc(msg)
+    tail = proc.flush()
+
+    partial_duration = (N_TIME - SPB) / FS
+    np.testing.assert_allclose(tail.data, [[3 / partial_duration, 1 / partial_duration, 0.0]], rtol=1e-6)
+    assert tail.axes["time"].offset == pytest.approx(1.0 + SPB / FS)
+    assert tail.axes["time"].gain == pytest.approx(out.axes["time"].gain)
+    assert (tail.segment, tail.config_id, tail.key, tail.attrs) == (msg.segment, out.config_id, msg.key, ATTRS)
+    assert tail.dims == out.dims and tail.data.dtype == out.data.dtype
+    assert proc.flush() is None
+
+
+@pytest.mark.parametrize("name", RATE_STAGES)
+def test_flush_with_a_final_message_appends_the_partial_bin(name):
+    out = RATE_STAGES[name]().flush(_partial_bin_events(dense=False))
+    assert out.data.shape == (2, len(LABELS))
+    assert out.data[1, 0] == pytest.approx(3 / ((N_TIME - SPB) / FS))
+
+
+@pytest.mark.parametrize("name", RATE_STAGES)
+def test_flush_emits_nothing_for_an_empty_partial_bin(name):
+    proc = RATE_STAGES[name]()
+    proc(_msg(sparse.COO.from_numpy(np.zeros((2 * SPB, len(LABELS)))), 0.0, 0))
+    assert proc.flush() is None
+
+
+@pytest.mark.parametrize("name", COUNT_STAGES)
+def test_flush_drops_a_partial_count_or_activation_bin(name):
+    proc = COUNT_STAGES[name]()
+    proc(_partial_bin_events(dense=False))
+    assert proc.flush() is None
+    # The dropped partial bin (e.g. a kernel MEAN's running sum) does not reach the next segment.
+    nxt = _partial_bin_events(dense=False, offset=10.0, segment=1)
+    np.testing.assert_array_equal(proc(nxt).data, COUNT_STAGES[name]()(nxt).data)
+
+
+@pytest.mark.parametrize("name", RATE_STAGES)
+def test_after_a_flush_the_next_segment_starts_clean(name):
+    proc = RATE_STAGES[name]()
+    proc(_partial_bin_events(dense=False))
+    proc.flush()
+    nxt = _partial_bin_events(dense=False, offset=10.0, segment=1)
+    continued = proc(nxt)
+    fresh = RATE_STAGES[name]()(nxt)
+    np.testing.assert_array_equal(continued.data, fresh.data)
+    assert continued.axes["time"] == fresh.axes["time"]
+    # And the same after a flush within one segment (a config change): a fresh grid, nothing carried.
+    proc.flush()
+    again = proc(replace(nxt, axes={**nxt.axes, "time": AxisArray.TimeAxis(fs=FS, offset=20.0)}))
+    np.testing.assert_array_equal(again.data, fresh.data)
+
+
+@pytest.mark.parametrize("name", ["rate", "binned", "kernel_activation"])
+def test_unit_publishes_the_partial_rate_bin_before_the_next_segment(name):
+    unit_cls, settings = {
+        "rate": (EventRate, EventRateSettings(bin_duration=0.02)),
+        "binned": (BinnedEventAggregatorUnit, BinnedEventAggregatorSettings(bin_duration=0.02)),
+        "kernel_activation": (
+            BinnedKernelActivationUnit,
+            BinnedKernelActivationSettings(
+                kernel_type=ActivationKernelType.COUNT,
+                aggregation=BinAggregation.SUM,
+                bin_duration=0.02,
+                rate_normalize=True,
+            ),
+        ),
+    }[name]
+    unit = unit_cls(settings)
+    unit.create_processor()
+
+    async def drive(msg):
+        return [m async for _, m in unit.on_signal(msg)]
+
+    asyncio.run(drive(_partial_bin_events(dense=False)))
+    tail, first = asyncio.run(drive(_partial_bin_events(dense=False, offset=10.0, segment=1)))
+    assert tail.segment == 0 and tail.data.shape == (1, len(LABELS))
+    assert first.segment == 1 and first.data.shape == (1, len(LABELS))

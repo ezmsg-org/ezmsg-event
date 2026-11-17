@@ -13,8 +13,8 @@ dependencies = [
     # left to the transitive requirement: uv only enables pre-releases for a
     # package named with a pre-release marker in *this* file.
     "ezmsg>=3.10.0b6",
-    "ezmsg-baseproc>=1.16.0",
-    "ezmsg-sigproc>=3.12.0",  # the scaler must keep its statistics across a segment
+    "ezmsg-baseproc>=1.17.0",
+    "ezmsg-sigproc>=3.13.0",  # config_id chaining, flush, and the scaler keeping its statistics across a segment
     "sparse>=0.17.0",
     "numpy>=2.2.6",
     "numba>=0.65.1",

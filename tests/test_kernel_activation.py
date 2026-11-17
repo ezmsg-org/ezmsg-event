@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import sparse
 from conftest import CHUNK_LEN, FS, N_CH, make_sparse_event_msg
-from ezmsg.util.messages.axisarray import AxisArray
+from ezmsg.util.messages.axisarray import AxisArray, replace
 
 from ezmsg.event.kernel_activation import (
     ActivationKernelType,
@@ -518,6 +518,45 @@ class TestMaxAggregation:
     def test_count_kernel_refuses_max(self):
         with pytest.raises(ValueError, match="MAX"):
             self._proc(ActivationKernelType.COUNT)(self._msg(self._events(False), 0, dense=False))
+
+    def _labelled(self, data, offset_samples: int, dense: bool, segment: int) -> AxisArray:
+        return replace(self._msg(data, offset_samples, dense), segment=segment, attrs={"unit": "uV"})
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    @pytest.mark.parametrize("dense", [False, True], ids=["sparse", "dense"])
+    @pytest.mark.parametrize("chunk", [206, 7], ids=["one_chunk", "chunked"])
+    def test_flush_emits_the_partial_bin_max(self, kernel_type, dense, chunk):
+        """At a gap, the open bin's max over the samples it got is emitted, at the bin's place on the grid."""
+        events = self._events(False)
+        events = np.concatenate((events, events[:6]))  # 20 full bins and 6 samples of a 21st
+        ref = _kernel_reference(events, kernel_type, 0.008, self.FS, normalize=True)
+        proc = self._proc(kernel_type, normalize=True)
+        outs = [proc(self._labelled(events[i : i + chunk], i, dense, 3)) for i in range(0, events.shape[0], chunk)]
+        tail = proc.flush()
+
+        np.testing.assert_allclose(tail.data, ref[200:].max(axis=0, keepdims=True), rtol=1e-9, atol=1e-12)
+        assert tail.data.dtype == outs[-1].data.dtype and tail.dims == outs[-1].dims
+        assert tail.axes["time"].offset == pytest.approx(200 / self.FS)
+        assert tail.axes["time"].gain == pytest.approx(self.SPB / self.FS)
+        assert (tail.segment, tail.config_id, tail.attrs) == (3, outs[-1].config_id, {"unit": "uV"})
+        assert proc.flush() is None
+
+    def test_flush_emits_nothing_for_an_empty_partial_bin(self):
+        proc = self._proc(ActivationKernelType.ALPHA)
+        proc(self._msg(self._events(False), 0, dense=False))
+        assert proc.flush() is None
+
+    @pytest.mark.parametrize("kernel_type", [ActivationKernelType.EXPONENTIAL, ActivationKernelType.ALPHA])
+    def test_after_a_flush_the_next_segment_starts_clean(self, kernel_type):
+        events = self._events(False)
+        proc = self._proc(kernel_type)
+        proc(self._labelled(events[:206], 0, False, 0))
+        proc.flush()
+        nxt = self._labelled(events, 5000, False, 1)
+        continued = proc(nxt)
+        fresh = self._proc(kernel_type)(nxt)
+        np.testing.assert_array_equal(continued.data, fresh.data)
+        assert continued.axes["time"] == fresh.axes["time"]
 
 
 class TestAlphaIsExact:

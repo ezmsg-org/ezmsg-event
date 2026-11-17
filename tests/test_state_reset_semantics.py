@@ -13,9 +13,8 @@ these transformers, so per-channel state carried over onto channels it did not
 belong to. Nothing about the output announces that; these tests are what would
 catch it coming back.
 
-``BinnedKernelActivation`` still overrides, because dtype and array backend are
-things the default cannot see. Its tests here pin both halves: what it adds, and
-what it now inherits.
+``BinnedKernelActivation`` no longer overrides either: the default now covers
+dtype and array backend too. Its tests here pin what it inherits.
 """
 
 import numpy as np
@@ -166,9 +165,9 @@ class TestWhatMustNotResetStillDoesNot:
         assert proc._hash == before
 
 
-class TestKernelActivationKeepsItsOverride:
-    """It adds dtype and backend, which the base class cannot see, and now
-    inherits the key and fingerprint, which it previously ignored."""
+class TestKernelActivationInheritsTheDefault:
+    """The default hash covers dtype and backend (once added by an override), the
+    key and the fingerprint."""
 
     @staticmethod
     def _proc():
