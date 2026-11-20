@@ -1,3 +1,5 @@
+import typing
+
 import ezmsg.core as ez
 from ezmsg.baseproc import BaseTransformerUnit
 from ezmsg.util.messages.axisarray import AxisArray
@@ -19,6 +21,10 @@ class EventRateSettings(ez.Settings):
     sample-locked to ``int(bin_duration * fs)`` samples (output rate
     ``fs / int(bin_duration * fs)``), matching :obj:`ezmsg.sigproc.window.Window`."""
 
+    phase: float | typing.Callable[[float], float] = 0.0
+    """Offset of the bin grid from the stream start, in seconds; a callable gets the
+    input sample rate at reset. See :attr:`BinnedKernelActivationSettings.phase`."""
+
 
 class Rate(BinnedKernelActivation):
     """
@@ -38,6 +44,7 @@ class Rate(BinnedKernelActivation):
                 normalize=False,
                 rate_normalize=True,
                 fractional=settings.fractional,
+                phase=settings.phase,
             )
         )
 
