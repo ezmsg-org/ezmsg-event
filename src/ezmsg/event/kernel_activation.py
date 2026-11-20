@@ -16,6 +16,7 @@ input.
 """
 
 import math
+import typing
 from enum import Enum
 
 import ezmsg.core as ez
@@ -91,6 +92,13 @@ class BinnedKernelActivationSettings(ez.Settings):
     is exactly ``bin_duration``. If False, bins span a *fixed* ``int(bin_duration *
     fs)`` samples and the output gain is ``int(bin_duration * fs) / fs``
     (sample-locked, matching :obj:`ezmsg.sigproc.window.Window`)."""
+
+    phase: float | typing.Callable[[float], float] = 0.0
+    """Offset of the bin grid from the stream start, in seconds: boundaries fall at
+    ``stream_start + phase + k * bin_duration``, rounded to whole input samples, and
+    the first bin is shortened (see :obj:`ezmsg.sigproc.util.binning.BinSchedule`).
+    A callable is called with the input sample rate at reset. Use a module-level
+    function (or a :func:`functools.partial` of one) so the settings stay picklable."""
 
 
 @processor_state
@@ -200,7 +208,12 @@ class BinnedKernelActivation(
 
         # The schedule owns the boundary arithmetic from here on; fractional mode
         # tracks the nominal bin_duration, sample-locked mode matches Window's grid.
-        self._state.schedule = BinSchedule(bin_duration=self.settings.bin_duration, fractional=self.settings.fractional)
+        phase = self.settings.phase
+        self._state.schedule = BinSchedule(
+            bin_duration=self.settings.bin_duration,
+            fractional=self.settings.fractional,
+            phase=phase(self._state.fs) if callable(phase) else phase,
+        )
         self._state.schedule.reset(self._state.fs)
 
         # Output: dense bins at the schedule's gain. Dense COUNT+SUM input stays float32 in its own
